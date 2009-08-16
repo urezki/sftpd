@@ -1,0 +1,21 @@
+                        ====== sftpd ======
+
+This is a single thread ftp server. Actually, it's an attempt to develop new
+kind of client processing mechanism just using one single thread for set of
+users, we don't use any pre-forking or other kind of such stuff for connection
+handle.
+
+How to build it:
+    In order to play with it, just type 'make' within tree folder, and then
+    run 'sftpd' binary file using root user. If you want to have an anonymous
+    access ftp user must be added.
+
+TODO list:
+     1) to rewrite "LIST" cmd, because it's full of crap right now;
+     2) to implement following commands: NLST, MODE, MDTM;
+     3) to implement more or less logging functionality;
+     4) to buckle down to test it.
+
+Contacts:
+        email: urezki@gmail.com
+        skype: uladzislau_rezki
