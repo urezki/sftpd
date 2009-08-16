@@ -452,7 +452,7 @@ process_transfers(fd_set *r_fd, fd_set *w_fd, int *n_ready)
 			upload_file(c);
 			(*n_ready)--;
 		} else {
-			/* BUG */
+			BUG();
 		}
 	}
 
