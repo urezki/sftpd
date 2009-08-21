@@ -95,57 +95,55 @@ static const struct cmd_handler cmd_table[] =
 	{ " ", 0, NULL, 0, 0 }
 };
 
-static void
-expand_to_abs(struct connection *conn)
+static int
+translate_path(const char *root, const char *cur, char *dst)
 {
-	char *abs_path;
-	char *tmp_path;
-	char *cmd_arg;
+	char absolute_path[PATH_MAX] = {'\0'};
+	char tmp_path[PATH_MAX] = {'\0'};
 	char *dot;
-	
-	abs_path = calloc(PATH_MAX, sizeof(char));
-	tmp_path = calloc(PATH_MAX, sizeof(char));
+	int n;
 
-	cmd_arg = strchr(conn->recv_buf, ' ');
-	if (cmd_arg == NULL || cmd_arg[1] == '\0')
-		goto end;
+	if (root == NULL || cur == NULL || dst == NULL)
+		return -1;
 
-	cmd_arg = cmd_arg + 1;
-	if (*cmd_arg == '/' || *cmd_arg == '~')
-		snprintf(abs_path, PATH_MAX, "%s%s", conn->root_dir,
-				 *(cmd_arg + 1) == '/' ? cmd_arg + 2 : cmd_arg + 1);
-	else
-		snprintf(abs_path, PATH_MAX, "%s%s", conn->curr_dir, cmd_arg);
+	if (*dst == '/' || *dst == '~') {
+		/* 1) cd / 2) cd ~/ 3) cd ~ */
+		n = snprintf(absolute_path, PATH_MAX, "%s%s", root,
+					 *(dst + 1) == '/' ? dst + 2 : dst + 1);
+	} else {
+		/* 1) cd foo/ */
+		n = snprintf(absolute_path, PATH_MAX, "%s%s", cur, dst);
+	}
+
+	/* /home/urezki/../ftp/.. */
+	if ((dot = strrchr(absolute_path, '.')))
+		if (*(dot - 1) == '.' && *(dot + 1) == '\0')
+			strcat(absolute_path, "/");
+
 	/*
-	 * If we have such situation: /home/demon/../ftp/..
-	 * we should add '/' to the end of the string.
+	 * Here we can have following combinations:
+	 * 1) /home/urezki/../ftp/../
+	 * 2) /home/urezki/
 	 */
-	if ((dot = strrchr(abs_path, '.')))
-		if (*(dot - 1) == '.' && *(dot + 1) == '\0' )
-			strcat(abs_path, "/");
-	
-	while ((dot = strstr(abs_path, "/../"))) {
+	while ((dot = strstr(absolute_path, "/../"))) {
 		char *s_pp = NULL;
 
-		if (dot == abs_path)
+		if (dot == absolute_path)
 			s_pp = dot;
 		else
 			s_pp = (dot - 1);
-		
-		while (s_pp != abs_path && *s_pp != '/')
+
+		while (s_pp != absolute_path && *s_pp != '/')
 			s_pp--;
 
 		*(s_pp + 1) = '\0';
 
-		snprintf(tmp_path, PATH_MAX, "%s%s", abs_path, dot + 4);
-		strncpy(abs_path, tmp_path, PATH_MAX);
+		snprintf(tmp_path, PATH_MAX, "%s%s", absolute_path, dot + 4);
+		snprintf(absolute_path, PATH_MAX, "%s", tmp_path);
 	}
 
-	*cmd_arg = '\0';
-	strcat(cmd_arg, abs_path);
-end:
-	free(abs_path);
-	free(tmp_path);
+	snprintf(dst, PATH_MAX, "%s", absolute_path);
+	return 0;
 }
 
 static int
@@ -153,9 +151,7 @@ is_path_ok(struct connection *conn)
 {
 	char *cmd_arg;
 	struct stat st;
-
-	/* build abs path */
-	expand_to_abs(conn);
+	int ret;
 
 	cmd_arg = strchr(conn->recv_buf, ' ');
 	if (cmd_arg == NULL || cmd_arg[1] == '\0')
@@ -163,8 +159,11 @@ is_path_ok(struct connection *conn)
 
 	/* get pointer to the arg */
 	cmd_arg = cmd_arg + 1;
+	ret = translate_path(conn->root_dir, conn->curr_dir, cmd_arg);
+	if (ret < 0)
+		goto fail;
 
-	/* checking sysmlyks ... */
+	/* check symbolic links */
 	if (stat(cmd_arg, &st) != -1) {
 		if (!S_ISLNK(st.st_mode)) {
 			char buf[1024] = {'\0'};
@@ -178,9 +177,10 @@ is_path_ok(struct connection *conn)
 			}
 		}
 	}
-	
+
 	if (!strncmp(cmd_arg, conn->root_dir, strlen(conn->root_dir)))
 		return 1;
+
 fail:
 	return 0;
 }
