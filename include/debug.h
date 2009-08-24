@@ -1,8 +1,8 @@
 #ifndef __DEBUG_H__
 #define __DEBUG_H__
 
-/* Raise invalid opcode exception */
-#define BUG() __asm__ __volatile__("ud2\n")
+/* just causes a Segmentation Fault */
+#define BUG() (*(int *)0 = 0)
 
 #define __DEBUG_MSG__
 //#define __DEBUG_FUNC__
