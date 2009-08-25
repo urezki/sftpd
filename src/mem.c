@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <syslog.h>
 
 /* local headers */
 #include <debug.h>
@@ -115,10 +114,11 @@ __free(void *ptr, const char *file, const char *func, int line)
 			break;
 		}
 	}
-	
-	if (!found)
-		syslog(LOG_ERR, "unallocated free of %p by %s in %s at line %d\n",
-			   ptr, func, file, line);
+
+	if (!found) {
+		PRINT_DEBUG("unallocated free of %p by %s in %s at line %d\n", ptr, func, file, line);
+		BUG();
+	}
 }
 
 /**
