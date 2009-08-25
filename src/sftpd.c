@@ -236,22 +236,20 @@ destroy_transport(connection *conn)
 	t = conn->transport;
 	if (!QUERY_FLAG(t->t_flags, T_FREE)) {
 		close_socket(t->socket);
-		/*
-		 * If t_flags is RETR or STOR, it means that we have already
-		 * opened local file, that is why we have to close it,
-		 * otherwise we don't have to do it.
-		 */
-		if (QUERY_FLAG(t->t_flags, T_RETR)) {
-			close(t->local_fd);
-			FD_CLR(t->socket, &srv->write_ready);
-		} else if (QUERY_FLAG(t->t_flags, T_STOR)) {
-			close(t->local_fd);
-			FD_CLR(t->socket, &srv->read_ready);
-		}
 
 		/*
-		 * We have to clean transport before next using !!!
+		 * It doesn't matter whether a local file
+		 * is opened or not, just try to close;
 		 */
+		close(t->local_fd);
+
+		/* in case of downloading */
+		FD_CLR(t->socket, &srv->write_ready);
+
+		/* in case of uploading */
+		FD_CLR(t->socket, &srv->read_ready);
+
+		/* clean transport before next using */
 		bzero(t, sizeof(transport));
 		SET_FLAG(t->t_flags, T_FREE);
 	}
@@ -509,7 +507,8 @@ download_file(struct connection *c)
 		goto again;
 
 	send_cmd(c->sock_fd, 226, "Transfer complete.");
-	destroy_transport(c);
+	SET_FLAG(t->t_flags, T_KILL);
+
 again:
 	FUNC_EXIT_VOID();
 }
@@ -539,7 +538,8 @@ upload_file(struct connection *c)
 	}
 
 	send_cmd(c->sock_fd, 226, "Transfer complete.");
-	destroy_transport(c);
+	SET_FLAG(t->t_flags, T_KILL);
+
 again:
 	FUNC_EXIT_VOID();
 }
