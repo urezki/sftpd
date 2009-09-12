@@ -235,19 +235,16 @@ destroy_transport(connection *conn)
 
 	t = conn->transport;
 	if (!QUERY_FLAG(t->t_flags, T_FREE)) {
-		close_socket(t->socket);
+		if (FD_ISSET(t->socket, &srv->write_ready))
+			/* in case of downloading */
+			FD_CLR(t->socket, &srv->write_ready);
 
-		/*
-		 * It doesn't matter whether a local file
-		 * is opened or not, just try to close;
-		 */
+		if (FD_ISSET(t->socket, &srv->read_ready))
+			/* in case of uploading */
+			FD_CLR(t->socket, &srv->read_ready);
+
 		close(t->local_fd);
-
-		/* in case of downloading */
-		FD_CLR(t->socket, &srv->write_ready);
-
-		/* in case of uploading */
-		FD_CLR(t->socket, &srv->read_ready);
+		close_socket(t->socket);
 
 		/* clean transport before next using */
 		bzero(t, sizeof(transport));
@@ -266,7 +263,11 @@ destroy_connection(connection *conn)
 
 	TAILQ_FOREACH(c, &conn_list, entries) {
 		if (c == conn) {
-			FD_CLR(conn->sock_fd, &(srv->read_ready));
+			if (FD_ISSET(conn->sock_fd, &(srv->read_ready)))
+				FD_CLR(conn->sock_fd, &(srv->read_ready));
+			else
+				BUG();
+
 			close_socket(conn->sock_fd);
 			srv->client_count--;
 			TAILQ_REMOVE(&conn_list, c, entries);
@@ -310,7 +311,7 @@ accept_client(int socket, fd_set *r_fd, int *n_ready)
 }
 
 static void
-check_received_signals(void)
+check_received_signals()
 {
 	if (signal_is_pending(SIGTERM) || signal_is_pending(SIGHUP)) {
 		struct connection *c;
@@ -327,39 +328,6 @@ check_received_signals(void)
 }
 
 static int
-clear_bad_fd(void)
-{
-	struct connection *c;
-	struct transport *t;
-
-	int processed = 0;
-	int ret;
-
-	FUNC_ENTRY();
-
-	TAILQ_FOREACH(c, &conn_list, entries) {
-		t = c->transport;
-
-		ret = check_socket(c->sock_fd);
-		if (ret == -1) {
-			SET_FLAG(c->c_flags, C_KILL);
-			processed++;
-		} else {
-			if (!QUERY_FLAG(t->t_flags, T_FREE)) {
-				ret = check_socket(t->socket);
-				if (ret == -1) {
-					SET_FLAG(t->t_flags, T_KILL);
-					processed++;
-				}
-			}
-		}
-	}
-
-	FUNC_EXIT_INT(processed);
-	return processed;
-}
-
-static int
 wait_for_events(ftpd *sftpd, fd_set *r_fd, fd_set *w_fd, int sec)
 {
 	struct timeval time;
@@ -373,14 +341,34 @@ wait_for_events(ftpd *sftpd, fd_set *r_fd, fd_set *w_fd, int sec)
 
 	n_ready = select(FD_SETSIZE, r_fd, w_fd, NULL, &time);
 	if (n_ready < 0) {
+		PRINT_DEBUG("'select()' failed with error: %s\n",
+					strerror(errno));
+
 		if (errno == EBADF) {
-			PRINT_DEBUG("'select()' failed with errno %d: %s\n",
-						  errno, strerror(errno));
+			struct connection *c;
+			struct transport *t;
+			int ret;
 
 			/*
-			 * It marks connections with bad descriptors.
+			 * if we get EBADF, it means that there is(are)
+			 * bad descriptor(s) in the sets. So, find them
+			 * and kill.
 			 */
-			clear_bad_fd();
+			TAILQ_FOREACH(c, &conn_list, entries) {
+				t = c->transport;
+
+				ret = check_socket(c->sock_fd);
+				if (ret < 0) {
+					SET_FLAG(c->c_flags, C_KILL);
+				} else {
+					if (!QUERY_FLAG(t->t_flags, T_FREE)) {
+						ret = check_socket(t->socket);
+						if (ret < 0) {
+							SET_FLAG(t->t_flags, T_KILL);
+						}
+					}
+				}
+			}
 		}
 
 		sleep(1);
@@ -406,6 +394,7 @@ process_timeouted_sockets(int time_m)
 		if (difftime(now, c->c_atime) > allow_time) {
 			if (!QUERY_FLAG(c->c_flags, C_KILL)) {
 				send_cmd(c->sock_fd, 421, "Timeout! Closing connection.");
+				PRINT_DEBUG("Timeout! Closing connection.\n");
 				SET_FLAG(c->c_flags, C_KILL);
 				processed++;
 			}
@@ -451,8 +440,13 @@ process_commands(fd_set *r_fd, int *n_ready)
 			 * more than RECV_BUF_SIZE bytes; and when there
 			 * is no data.
 			 */
-			if (avail_b > RECV_BUF_SIZE)
+			if (avail_b > RECV_BUF_SIZE) {
 				send_cmd(c->sock_fd, 503, "Buffer is overflowed, sorry.");
+				PRINT_DEBUG("Buffer is overflowed, connection will be killed.\n");
+			} else {
+				/* it can happen when a client close a socket */
+				PRINT_DEBUG("There is no data, connection will be killed.\n");
+			}
 
 			SET_FLAG(c->c_flags, C_KILL);
 		}
