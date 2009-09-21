@@ -235,15 +235,18 @@ destroy_transport(connection *conn)
 
 	t = conn->transport;
 	if (!QUERY_FLAG(t->t_flags, T_FREE)) {
-		if (FD_ISSET(t->socket, &srv->write_ready))
+		if (FD_ISSET(t->socket, &srv->write_ready)) {
 			/* in case of downloading */
 			FD_CLR(t->socket, &srv->write_ready);
+			close(t->local_fd);
+		}
 
-		if (FD_ISSET(t->socket, &srv->read_ready))
+		if (FD_ISSET(t->socket, &srv->read_ready)) {
 			/* in case of uploading */
 			FD_CLR(t->socket, &srv->read_ready);
+			close(t->local_fd);
+		}
 
-		close(t->local_fd);
 		close_socket(t->socket);
 
 		/* clean transport before next using */
