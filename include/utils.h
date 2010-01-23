@@ -6,5 +6,6 @@ extern void reset_euid(void);
 
 extern void set_egid(gid_t);
 extern void reset_egid(void);
+extern int remove_folder(const char *);
 
 #endif  /* __UTILS_H__ */

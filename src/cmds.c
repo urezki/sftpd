@@ -486,18 +486,18 @@ cmd_rmd(struct connection *conn)
 {
 	char *dir_name;
 	int ret;
-	
+
 	FUNC_ENTRY();
-	
+
 	if (is_path_ok(conn)) {
 		dir_name = strchr(conn->recv_buf, ' ') + 1;	
-		ret = rmdir(dir_name);
-		if (ret != -1)
+		ret = remove_folder(dir_name);
+		if (ret == 0)
 			send_cmd(conn->sock_fd, 250, "Directory deleted.");
 		else
 			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
 	}
-	
+
 	FUNC_EXIT_VOID();
 }
 
