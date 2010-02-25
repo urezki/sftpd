@@ -8,18 +8,25 @@
 #define C_AUTH	0x00000001
 #define C_KILL	0x00000002
 
-/* transport specific flags */
+/* states of the transport */
 #define T_FREE	0x00000001
 #define T_PORT	0x00000002
 #define T_PASV	0x00000004
 #define T_LIST	0x00000008
 #define T_RETR	0x00000010
 #define T_STOR	0x00000020
-#define T_KILL	0x00000040
+#define T_ACPT	0x00000040		/* accepting */
+#define T_KILL	0x00000080
 
-#define SET_FLAG(X,Y)	(X = (X^X) | Y)
-#define QUERY_FLAG(X,Y)	(X & Y)
-#define CLEAR_FLAG(X,Y)	(X &= ~Y)
+/* flags for LIST cmd */
+#define L_CURR	0x00000001		/* list current folder */
+#define L_ABSL	0x00000002		/* list absolute folder */
+#define L_FILE	0x00000004		/* list one file */
+
+#define FLAG_SET(X,Y)		(X = (X^X) | Y)
+#define FLAG_APPEND(X,Y)	(X = (X | Y))
+#define FLAG_QUERY(X,Y)		(X & Y)
+#define FLAG_CLEAR(X,Y)		(X &= ~Y)
 
 struct connection {
 	char recv_buf[RECV_BUF_SIZE];
@@ -44,16 +51,25 @@ struct transport {
 	struct sockaddr_in r_info;
 	struct stat st;
 
+	int listen_socket;
 	int socket;
+
 	int data_port;
 
 	int local_fd;
 	off_t offset;
 
+	/* state */
 	int t_flags;
+
+	/*
+	 * for LIST/NLST cmd
+	 */
+	DIR *target_dir;
 };
 
 struct ftpd {
+	struct hash *cmd_hash_table;
 	unsigned int client_count;
 	fd_set write_ready;
 	fd_set read_ready;

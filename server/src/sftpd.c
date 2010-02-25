@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/sendfile.h>
+#include <dirent.h>
 
 /* local headers */
 #include <list.h>
@@ -20,7 +21,9 @@
 #include <debug.h>
 #include <sftpd.h>
 #include <cmds.h>
+#include <hash.h>
 #include <mem.h>
+#include <ls.h>
 
 #define PID_FILE "/var/run/sftpd.pid"
 #define DEV_NULL "/dev/null"
@@ -139,6 +142,7 @@ init_sftpd(int argc, char **argv)
 {
 	ftpd *sftpd = NULL;
 	int fork_flag = 0;
+	int ret;
 	int ch;
 
 	FUNC_ENTRY();
@@ -169,6 +173,22 @@ init_sftpd(int argc, char **argv)
 	sftpd = (ftpd *) calloc(1, sizeof(ftpd));
 	if (sftpd == NULL)
 		FATAL_ERROR("error allocating memory\n");
+
+	/*
+	 * Create hash table with size 100, in spite of we
+	 * have approximately 29 FTP commands, by this way
+	 * we tend to avoid collisions.
+	 */
+	sftpd->cmd_hash_table = hash_create(100);
+	if (sftpd->cmd_hash_table == NULL)
+		FATAL_ERROR("error allocating memory\n");
+
+	/* adding to hash commands and their handlers */
+	for (int i = 0; cmd_table[i].cmd_handler; i++) {
+		ret = hash_add(sftpd->cmd_hash_table, cmd_table[i].cmd_name, (void *)&cmd_table[i]);
+		if (ret == 0)
+			FATAL_ERROR("error adding to the hash\n");
+	}
 
 	/* init some stuff */
 	sftpd->client_count = 0;
@@ -210,7 +230,7 @@ add_connection(int s)
 		new_conn->sock_fd = s;
 		new_conn->c_flags = 0;	/* reset flag */
 
-		SET_FLAG(tr->t_flags, T_FREE);
+		FLAG_SET(tr->t_flags, T_FREE);
 		new_conn->transport = tr;
 
 		TAILQ_INSERT_TAIL(&conn_list, new_conn, entries);
@@ -234,24 +254,50 @@ destroy_transport(connection *conn)
 	FUNC_ENTRY();
 
 	t = conn->transport;
-	if (!QUERY_FLAG(t->t_flags, T_FREE)) {
-		if (FD_ISSET(t->socket, &srv->write_ready)) {
-			/* in case of downloading */
-			FD_CLR(t->socket, &srv->write_ready);
-			close(t->local_fd);
+	if (!FLAG_QUERY(t->t_flags, T_FREE)) {
+		/* listing */
+		if (FLAG_QUERY(t->t_flags, T_LIST)) {
+			if (t->socket >= 0) {
+				FD_CLR(t->socket, &srv->write_ready);
+			} else {
+				BUG();
+			}
+
+			closedir(t->target_dir);
+		} else if (FLAG_QUERY(t->t_flags, (T_RETR | T_STOR))) {
+			/* downloading or uploading */
+			if (t->socket >= 0) {
+				if (FLAG_QUERY(t->t_flags, T_RETR))
+					FD_CLR(t->socket, &srv->write_ready);
+				else
+					FD_CLR(t->socket, &srv->read_ready);
+			} else {
+				BUG();
+			}
+
+			if (t->local_fd >= 0)
+				close(t->local_fd);
+			else
+				BUG();
+		} else if (FLAG_QUERY(t->t_flags, T_ACPT)) {
+			/* accepting */
+			if (t->listen_socket >= 0) {
+				FD_CLR(t->listen_socket, &srv->read_ready);
+			} else {
+				BUG();
+			}
+
+			close_socket(t->listen_socket);
 		}
 
-		if (FD_ISSET(t->socket, &srv->read_ready)) {
-			/* in case of uploading */
-			FD_CLR(t->socket, &srv->read_ready);
-			close(t->local_fd);
-		}
-
-		close_socket(t->socket);
+		if (t->socket >= 0)
+			close_socket(t->socket);
+		else
+			BUG();
 
 		/* clean transport before next using */
 		bzero(t, sizeof(transport));
-		SET_FLAG(t->t_flags, T_FREE);
+		FLAG_SET(t->t_flags, T_FREE);
 	}
 
 	FUNC_EXIT_VOID();
@@ -285,7 +331,7 @@ destroy_connection(connection *conn)
 }
 
 static void
-accept_client(int socket, fd_set *r_fd, int *n_ready)
+accept_connection(int socket, fd_set *r_fd, int *n_ready)
 {
 	struct sockaddr_in r_addr;
 	connection *conn = NULL;
@@ -324,6 +370,7 @@ check_received_signals()
 		}
 
 		unlink_pid_file(PID_FILE);
+		hash_destroy(srv->cmd_hash_table);
 		close(srv->srv_socket);
 		free(srv);
 		exit(1);				/* finish up */
@@ -362,12 +409,12 @@ wait_for_events(ftpd *sftpd, fd_set *r_fd, fd_set *w_fd, int sec)
 
 				ret = check_socket(c->sock_fd);
 				if (ret < 0) {
-					SET_FLAG(c->c_flags, C_KILL);
+					FLAG_SET(c->c_flags, C_KILL);
 				} else {
-					if (!QUERY_FLAG(t->t_flags, T_FREE)) {
+					if (!FLAG_QUERY(t->t_flags, T_FREE)) {
 						ret = check_socket(t->socket);
 						if (ret < 0) {
-							SET_FLAG(t->t_flags, T_KILL);
+							FLAG_APPEND(t->t_flags, T_KILL);
 						}
 					}
 				}
@@ -395,10 +442,10 @@ process_timeouted_sockets(int time_m)
 
 	TAILQ_FOREACH(c, &conn_list, entries) {
 		if (difftime(now, c->c_atime) > allow_time) {
-			if (!QUERY_FLAG(c->c_flags, C_KILL)) {
+			if (!FLAG_QUERY(c->c_flags, C_KILL)) {
 				send_cmd(c->sock_fd, 421, "Timeout! Closing connection.");
 				PRINT_DEBUG("Timeout! Closing connection.\n");
-				SET_FLAG(c->c_flags, C_KILL);
+				FLAG_SET(c->c_flags, C_KILL);
 				processed++;
 			}
 		}
@@ -426,7 +473,7 @@ process_commands(fd_set *r_fd, int *n_ready)
 		 * and free memory which was allocated, we must
 		 * set C_KILL flag.
 		 */
-		if (QUERY_FLAG(c->c_flags, C_KILL))
+		if (FLAG_QUERY(c->c_flags, C_KILL))
 			continue;
 
 		ioctl(c->sock_fd, FIONREAD, &avail_b);
@@ -451,7 +498,7 @@ process_commands(fd_set *r_fd, int *n_ready)
 				PRINT_DEBUG("There is no data, connection will be killed.\n");
 			}
 
-			SET_FLAG(c->c_flags, C_KILL);
+			FLAG_SET(c->c_flags, C_KILL);
 		}
 
 		if (++processed == *n_ready) {
@@ -476,11 +523,11 @@ restart:
 	TAILQ_FOREACH(c, &conn_list, entries) {
 		t = c->transport;
 
-		if (QUERY_FLAG(c->c_flags, C_KILL)) {
+		if (FLAG_QUERY(c->c_flags, C_KILL)) {
 			destroy_connection(c);
 			processed++;
 			goto restart;
-		} else if (QUERY_FLAG(t->t_flags, T_KILL)) {
+		} else if (FLAG_QUERY(t->t_flags, T_KILL)) {
 			destroy_transport(c);
 			processed++;
 		}
@@ -504,7 +551,7 @@ download_file(struct connection *c)
 		goto again;
 
 	send_cmd(c->sock_fd, 226, "Transfer complete.");
-	SET_FLAG(t->t_flags, T_KILL);
+	FLAG_APPEND(t->t_flags, T_KILL);
 
 again:
 	FUNC_EXIT_VOID();
@@ -535,9 +582,31 @@ upload_file(struct connection *c)
 	}
 
 	send_cmd(c->sock_fd, 226, "Transfer complete.");
-	SET_FLAG(t->t_flags, T_KILL);
+	FLAG_APPEND(t->t_flags, T_KILL);
 
 again:
+	FUNC_EXIT_VOID();
+}
+
+static void
+list_folder(struct connection *c)
+{
+	struct transport *t;
+	char *list;
+
+	FUNC_ENTRY();
+
+	t = c->transport;
+
+	list = get_file_list_chunk(t->target_dir, 300, 0);
+	if (list) {
+		send_data(t->socket, list, strlen(list), 0);
+		free(list);
+	} else {
+		send_cmd(c->sock_fd, 226, "ASCII Transfer complete");
+		FLAG_APPEND(t->t_flags, T_KILL);
+	}
+
 	FUNC_EXIT_VOID();
 }
 
@@ -553,8 +622,8 @@ process_transfers(fd_set *r_fd, fd_set *w_fd, int *n_ready)
 	TAILQ_FOREACH(c, &conn_list, entries) {
 		t = c->transport;
 
-		/* skip who is FREE or KILL */
-		if (QUERY_FLAG(t->t_flags, (T_FREE | T_KILL)))
+		/* skip who is FREE, KILL, PORT or PASV */
+		if (FLAG_QUERY(t->t_flags, (T_FREE | T_KILL | T_PORT | T_PASV)))
 			continue;
 
 		if (processed == *n_ready)
@@ -562,20 +631,54 @@ process_transfers(fd_set *r_fd, fd_set *w_fd, int *n_ready)
 
 		/* skip transfers which are not ready */
 		if (!FD_ISSET(t->socket, w_fd) &&
-		    !FD_ISSET(t->socket, r_fd))
+		    !FD_ISSET(t->socket, r_fd) &&
+			!FD_ISSET(t->listen_socket, r_fd))
 			continue;
 
-		if (QUERY_FLAG(t->t_flags, T_RETR)) {
-			c->c_atime = time(NULL);
-			download_file(c);
-			(*n_ready)--;
-			processed++;
-		} else if (QUERY_FLAG(t->t_flags, T_STOR)) {
-			c->c_atime = time(NULL);
-			upload_file(c);
-			(*n_ready)--;
-		} else {
-			BUG();
+		if (FLAG_QUERY(t->t_flags, T_LIST)) {
+			if (FD_ISSET(t->socket, w_fd)) {
+				c->c_atime = time(NULL);
+				list_folder(c);
+				(*n_ready)--;
+				processed++;
+			}
+		} else if (FLAG_QUERY(t->t_flags, T_ACPT)) {
+			if (FD_ISSET(t->listen_socket, r_fd)) {
+				t->socket = accept_timeout(t->listen_socket, (SA *)&t->r_info, 5);
+				if (t->socket != -1) {
+					/* we are in PASV mode */
+					activate_nonblock(t->socket);
+					FD_CLR(t->listen_socket, &srv->read_ready);
+					FLAG_SET(t->t_flags, T_PASV);
+					close_socket(t->listen_socket);
+				} else {
+					/*
+					 * listen_socket will be cleaned and closed
+					 * by the 'destroy_transport' routine, don't
+					 * use FD_CLR here.
+					 */
+					send_cmd(c->sock_fd, 500, "%s", strerror(errno));
+					PRINT_DEBUG("%s\n", strerror(errno));
+					FLAG_APPEND(t->t_flags, T_KILL);
+				}
+
+				c->c_atime = time(NULL);
+				(*n_ready)--;
+				processed++;
+			}
+		} else if (FLAG_QUERY(t->t_flags, T_RETR)) {
+			if (FD_ISSET(t->socket, w_fd)) {
+				c->c_atime = time(NULL);
+				download_file(c);
+				(*n_ready)--;
+				processed++;
+			}
+		} else if (FLAG_QUERY(t->t_flags, T_STOR)) {
+			if (FD_ISSET(t->socket, r_fd)) {
+				c->c_atime = time(NULL);
+				upload_file(c);
+				(*n_ready)--;
+			}
 		}
 	}
 
@@ -612,7 +715,7 @@ int main(int argc, char **argv)
 		process_clients_marked_as_destroy();
 
 		/* accept new clients, if they are */
-		accept_client(srv->srv_socket, &r_fd, &n_ready);
+		accept_connection(srv->srv_socket, &r_fd, &n_ready);
 	}
 
 	return 0;

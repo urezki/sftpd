@@ -34,7 +34,7 @@ send_data(int s, const void *buf, int len, int flags)
 	FUNC_ENTRY();
 	
 	for (total = 0; total < len; total += n) {
-		n = send(s, buf + total, len - total, flags);
+		n = send(s, buf + total, len - total, MSG_NOSIGNAL);
 		if (n < 0) {
 			PRINT_DEBUG("Write to socket failed with errno %d: %s\n",
 						errno, strerror(errno));
@@ -69,7 +69,7 @@ recv_data(int s, void *buf, int len, int flags)
 	FUNC_ENTRY();
 
 	for (total = 0; total < len; total += n) {
-		n = recv(s, buf + total, len - total, flags);
+		n = recv(s, buf + total, len - total, MSG_NOSIGNAL);
 		if (n <= 0) {
 			PRINT_DEBUG("Read from socket failed with errno %d: %s\n",
 						errno, strerror(errno));

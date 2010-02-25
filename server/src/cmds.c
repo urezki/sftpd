@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <sys/ioctl.h>
+#include <dirent.h>
 
 /* local headers */
 #include <list.h>
@@ -23,77 +24,9 @@
 #include <debug.h>
 #include <sftpd.h>
 #include <cmds.h>
+#include <hash.h>
 #include <mem.h>
 #include <ls.h>
-
-static void cmd_user(struct connection *);
-static void cmd_pass(struct connection *);
-static void cmd_port(struct connection *);
-static void cmd_pasv(struct connection *);
-static void cmd_list(struct connection *);
-static void cmd_cdup(struct connection *);
-static void cmd_retr(struct connection *);
-static void cmd_size(struct connection *);
-static void cmd_noop(struct connection *);
-static void cmd_syst(struct connection *);
-static void cmd_type(struct connection *);
-static void cmd_stru(struct connection *);
-static void cmd_quit(struct connection *);
-static void cmd_feat(struct connection *);
-static void cmd_abor(struct connection *);
-static void cmd_stor(struct connection *);
-static void cmd_dele(struct connection *);
-static void cmd_help(struct connection *);
-static void cmd_allo(struct connection *);
-static void cmd_pwd(struct connection *);
-static void cmd_cwd(struct connection *);
-static void cmd_rmd(struct connection *);
-static void cmd_mkd(struct connection *);
-
-/* static void cmd_nlst(struct connection *); */
-/* static void cmd_mode(struct connection *); */
-/* static void cmd_mdtm(struct connection *); */
-
-struct cmd_handler {
-	char cmd_name[10];
-	char arg;
-	void (*cmd_handler)(struct connection *const);
-	char need_root;
-	char cmd_len;
-};
-
-static const struct cmd_handler cmd_table[] =
-{
-	{ "user", 1, cmd_user, 1, 4 },
-	{ "pass", 1, cmd_pass, 1, 4 },
-	{ "port", 1, cmd_port, 1, 4 },
-	{ "pasv", 0, cmd_pasv, 0, 4 },
-	{ "list", 0, cmd_list, 1, 4 },
-	{ "cdup", 0, cmd_cdup, 0, 4 },
-	{ "retr", 1, cmd_retr, 0, 4 },
-	{ "size", 1, cmd_size, 0, 4 },
-	{ "noop", 0, cmd_noop, 0, 4 },
-	{ "syst", 0, cmd_syst, 0, 4 },
-	{ "type", 0, cmd_type, 0, 4 },
-	{ "abor", 0, cmd_abor, 0, 4 },
-	{ "stru", 0, cmd_stru, 0, 4 },
-	{ "quit", 0, cmd_quit, 0, 4 },
-	{ "feat", 0, cmd_feat, 0, 4 },
-	{ "help", 0, cmd_help, 0, 4 },
-//	{ "mdtm", 0, cmd_mdtm, 0, 4 }, /* not implemented */
-#ifdef UPLOAD_SUPPORT
-	{ "stor", 0, cmd_stor, 0, 4 },
-	{ "dele", 1, cmd_dele, 0, 4 },
-	{ "rmd", 1, cmd_rmd, 0, 3 },
-	{ "mkd", 1, cmd_mkd, 0, 3 },
-#endif
-//	{ "nlst", 0, cmd_nlst, 0, 4 }, /* not implemented */
-//	{ "mode", 0, cmd_mode, 0, 4 }, /* not implemented */
-	{ "allo", 0, cmd_allo, 0, 4 },
-	{ "pwd", 0, cmd_pwd, 0, 3 },
-	{ "cwd", 1, cmd_cwd, 0, 3 },
-	{ " ", 0, NULL, 0, 0 }
-};
 
 static int
 translate_path(const char *root, const char *cur, char *dst)
@@ -146,6 +79,23 @@ translate_path(const char *root, const char *cur, char *dst)
 	return 0;
 }
 
+static char *
+get_cmd_arg(struct connection *c, int pos)
+{
+	char *cmd_arg;
+
+	if (pos == 0)
+		cmd_arg = strchr(c->recv_buf, ' '); /* first */
+	else
+		cmd_arg = strrchr(c->recv_buf, ' '); /* last */
+
+	/* checks whether we have any args. */
+	if (cmd_arg == NULL || *(cmd_arg + 1) == '\0')
+		return NULL;
+
+	return cmd_arg + 1;
+}
+
 static int
 is_path_ok(struct connection *conn)
 {
@@ -153,12 +103,10 @@ is_path_ok(struct connection *conn)
 	struct stat st;
 	int ret;
 
-	cmd_arg = strchr(conn->recv_buf, ' ');
-	if (cmd_arg == NULL || cmd_arg[1] == '\0')
+	cmd_arg = get_cmd_arg(conn, 1);
+	if (cmd_arg == NULL)
 		goto fail;
 
-	/* get pointer to the arg */
-	cmd_arg = cmd_arg + 1;
 	ret = translate_path(conn->root_dir, conn->curr_dir, cmd_arg);
 	if (ret < 0)
 		goto fail;
@@ -268,14 +216,14 @@ cmd_pass(struct connection *conn)
 
 		/* in case of anonymous access */
 		if (!strncmp(conn->user_name, "ftp", 3)) {
-			SET_FLAG(conn->c_flags, C_AUTH);
+			FLAG_SET(conn->c_flags, C_AUTH);
 		} else if (user_pass != NULL && conn->recv_buf_len > 4) {
 			char *p_crypt;
 			
 			p_crypt = crypt(user_pass + 1, p->pw_passwd);
 			if (p_crypt != NULL) {
 				if (!strcmp(p_crypt, p->pw_passwd)) {
-					SET_FLAG(conn->c_flags, C_AUTH);
+					FLAG_SET(conn->c_flags, C_AUTH);
 				} else {
 					/* checking shadow pass */
 					p_shadow = getspnam(conn->user_name);
@@ -283,13 +231,13 @@ cmd_pass(struct connection *conn)
 						p_crypt = crypt(user_pass + 1, p_shadow->sp_pwdp);
 					if (p_crypt != NULL)
 						if (!strcmp(p_crypt, p_shadow->sp_pwdp))
-							SET_FLAG(conn->c_flags, C_AUTH);
+							FLAG_SET(conn->c_flags, C_AUTH);
 				}
 			}
 		}
 	}
 
-	if (QUERY_FLAG(conn->c_flags, C_AUTH)) {
+	if (FLAG_QUERY(conn->c_flags, C_AUTH)) {
 		send_cmd(conn->sock_fd, 230, "%s %s", conn->user_name, "logged in");
 		PRINT_DEBUG("%s user logged in\n", conn->user_name);
 		chdir(conn->root_dir);
@@ -314,33 +262,40 @@ cmd_port(struct connection *conn)
 	char *ip_address = NULL;
 	int data_port = 0;
 	transport *t;
+	int socket;
 	int ret;
-	
+	int len;
+
 	FUNC_ENTRY();
 
 	t = conn->transport;
 	ip_address = strchr(conn->recv_buf, ' ');
 
-	if (QUERY_FLAG(t->t_flags, T_FREE)) {
+	if (FLAG_QUERY(t->t_flags, T_FREE) && ip_address) {
 		short int a0, a1, a2, a3, p0, p1;
 
 		ret = sscanf(ip_address + 1, "%3hu,%3hu,%3hu,%3hu,%3hu,%3hu",
 					 &a0, &a1, &a2, &a3, &p0, &p1);
-		
+
 		data_port = p0 * 256 + p1;
 		if (data_port > 1024 && ret == 6) {
-			int len;
-			
-			t->socket = get_ipv4_socket();
+			socket = get_ipv4_socket();
+			if (socket < 0)
+				goto failed_with_errno;
+
 			t->data_port = data_port;
-			activate_reuseaddr(t->socket);
-			
+			activate_reuseaddr(socket);
+
 			t->r_info.sin_port = htons(DATA_PORT);
 			t->r_info.sin_family = AF_INET;
-			
+
 			len = sizeof(t->r_info);
-			bind(t->socket, (SA *)&t->r_info, len);
-			
+			ret = bind(socket, (SA *)&t->r_info, len);
+			if (ret != 0) {
+				close_socket(socket);
+				goto failed_with_errno;
+			}
+
 			t->r_info.sin_family = AF_INET;
 			t->r_info.sin_port = htons(t->data_port);
 			t->r_info.sin_addr.s_addr = htonl(
@@ -348,24 +303,29 @@ cmd_port(struct connection *conn)
 				((unsigned char)(a1) << 16) +
 				((unsigned char)(a2) << 8)  +
 				((unsigned char)(a3)));
-			
-			ret = connect_timeout(t->socket, (SA *)&t->r_info, 5);
-			if (ret == 0) {
-				/* we are in a port mode */
-				SET_FLAG(t->t_flags, T_PORT);
-				activate_nonblock(t->socket);
 
-				send_cmd(conn->sock_fd, 220, "PORT command successful");
-			} else {
-				send_cmd(conn->sock_fd, 425, "Can't open data connection");
-				PRINT_DEBUG("Can't connect to %s:%d\n", ip_address, data_port);
+			ret = connect_timeout(socket, (SA *)&t->r_info, 5);
+			if (ret != 0) {
+				close_socket(socket);
+				goto failed_with_errno;
 			}
+
+			/* we are in a port mode */
+			t->socket = socket;
+			FLAG_SET(t->t_flags, T_PORT);
+			activate_nonblock(t->socket);
+			send_cmd(conn->sock_fd, 220, "PORT command successful");
+			goto end;
 		}
 	} else {
 		send_cmd(conn->sock_fd, 503, "Sorry, only one transfer at once.");
 		PRINT_DEBUG("Sorry, only one transfer at once\n");
+		goto end;
 	}
-	
+
+failed_with_errno:
+	send_cmd(conn->sock_fd, 503, "%s", strerror(errno));
+end:
 	FUNC_EXIT_VOID();
 }
 
@@ -374,28 +334,40 @@ cmd_pasv(struct connection *conn)
 {
 	struct sockaddr_in addr;
 	int listen_sock;
-	transport *trans;
+	transport *t;
 	socklen_t len;
+	int ret;
 
 	FUNC_ENTRY();
 
-	trans = conn->transport;
-	if (QUERY_FLAG(trans->t_flags, T_FREE)) {
-		memset(&addr, 0, sizeof(addr));
+	t = conn->transport;
+	if (FLAG_QUERY(t->t_flags, T_FREE)) {
 		listen_sock = get_ipv4_socket();
+		if (listen_sock < 0)
+			goto failed_with_errno;
+
 		activate_reuseaddr(listen_sock);
-		
+		memset(&addr, 0, sizeof(addr));
+
 		len = sizeof(addr);
 		getsockname(conn->sock_fd, (struct sockaddr *)&addr, &len);
-		
+
 		addr.sin_port = 0;
-		bind(listen_sock, (struct sockaddr *)&addr, sizeof(struct sockaddr));
-		
+		ret = bind(listen_sock, (struct sockaddr *)&addr, sizeof(struct sockaddr));
+		if (ret != 0) {
+			close_socket(listen_sock);
+			goto failed_with_errno;
+		}
+
 		len = sizeof(addr);
 		getsockname(listen_sock, (struct sockaddr *)&addr, &len);
-		listen(listen_sock, 1);
+		ret = listen(listen_sock, 1);
+		if (ret != 0) {
+			close_socket(listen_sock);
+			goto failed_with_errno;
+		}
 
-		/* send that we are ready */
+		/* we are ready */
 		send_cmd(conn->sock_fd, 227, "Entering passive mode (%u,%u,%u,%u,%u,%u)",
 				 (htonl(addr.sin_addr.s_addr) & 0xff000000) >> 24,
 				 (htonl(addr.sin_addr.s_addr) & 0x00ff0000) >> 16,
@@ -404,27 +376,19 @@ cmd_pasv(struct connection *conn)
 				 (htons(addr.sin_port) & 0xff00) >> 8,
 				 (htons(addr.sin_port) & 0x00ff));
 
-		/*
-		 * listen_sock should be added to the poll, and checked by select,
-		 * after that when socket is ready do accept.
-		 */
-		trans->socket = accept_timeout(listen_sock, (SA *)&trans->r_info, 5);
-		if (trans->socket != -1) {
-			/* we are in PASV mode */
-			SET_FLAG(trans->t_flags, T_PASV);
-			activate_nonblock(trans->socket);
-		} else {
-			send_cmd(conn->sock_fd, 500, "Accepting error, sorry");
-			PRINT_DEBUG("Accepting error. sorry\n");
-		}
-
-		/* we needn't listen further */
-		close_socket(listen_sock);
+		t->listen_socket = listen_sock;
+		FD_SET(t->listen_socket, &srv->read_ready);
+		FLAG_SET(t->t_flags, T_ACPT);
+		goto end;
 	} else {
 		send_cmd(conn->sock_fd, 503, "Sorry, only one transfer at once.");
 		PRINT_DEBUG("Sorry, only one transfer at once\n");
+		goto end;
 	}
-	
+
+failed_with_errno:
+	send_cmd(conn->sock_fd, 503, "%s", strerror(errno));
+end:
 	FUNC_EXIT_VOID();
 }
 
@@ -437,7 +401,7 @@ cmd_retr(struct connection *conn)
 	FUNC_ENTRY();
 	
 	t = conn->transport;
-	if (!QUERY_FLAG(t->t_flags, (T_PORT | T_PASV))) {
+	if (!FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) {
 		send_cmd(conn->sock_fd, 425, "You must use PASV or PORT before.");
 		goto leave;
 	}
@@ -450,7 +414,7 @@ cmd_retr(struct connection *conn)
 			
 			FD_SET(t->socket, &srv->write_ready);
 			send_cmd(conn->sock_fd, 150, "Binary mode.");
-			SET_FLAG(t->t_flags, T_RETR);
+			FLAG_SET(t->t_flags, T_RETR);
 		} else {
 			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
 		}
@@ -459,8 +423,8 @@ cmd_retr(struct connection *conn)
 		send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
 	}
 
-	if (!QUERY_FLAG(t->t_flags, T_RETR))
-		SET_FLAG(t->t_flags, T_KILL);
+	if (!FLAG_QUERY(t->t_flags, T_RETR))
+		FLAG_APPEND(t->t_flags, T_KILL);
 
 leave:
 	FUNC_EXIT_VOID();
@@ -496,6 +460,8 @@ cmd_rmd(struct connection *conn)
 			send_cmd(conn->sock_fd, 250, "Directory deleted.");
 		else
 			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+	} else {
+		send_cmd(conn->sock_fd, 550, "sorry bad path");
 	}
 
 	FUNC_EXIT_VOID();
@@ -536,7 +502,7 @@ cmd_stor(struct connection *conn)
 	FUNC_ENTRY();
 	
 	t = conn->transport;
-	if (QUERY_FLAG(t->t_flags, (T_PORT | T_PASV))) {
+	if (FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) {
 		if (is_path_ok(conn)) {
 			char *l_file = strchr(conn->recv_buf, ' ') + 1;
 
@@ -544,10 +510,10 @@ cmd_stor(struct connection *conn)
 			if (t->local_fd != -1) {
 				FD_SET(t->socket, &srv->read_ready);
 				send_cmd(conn->sock_fd, 150, "Binary mode.");
-				SET_FLAG(t->t_flags, T_STOR);
+				FLAG_SET(t->t_flags, T_STOR);
 			} else {
 				send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
-				SET_FLAG(t->t_flags, T_KILL);
+				FLAG_APPEND(t->t_flags, T_KILL);
 			}
 		}
 	} else {
@@ -582,41 +548,55 @@ cmd_size(struct connection *conn)
 	FUNC_EXIT_VOID();
 }
 
-/* static void */
-/* cmd_mdtm(struct connection *conn) */
-/* { */
-/* 	FUNC_ENTRY(); */
-	
-	
-	
-/* 	FUNC_EXIT_VOID(); */
-/* } */
-
+/*
+ * If the pathname specifies a directory or other group of files,
+ * the server should transfer a list of files in the specified
+ * directory. If the pathname specifies a file then the server
+ * should send current information on the file. A null argument
+ * implies the user's current working or default directory.
+ * The data transfer is over the data connection in type ASCII
+ * or type EBCDIC.
+ *
+ * See RFC-959
+ */
 static void
 cmd_list(struct connection *conn)
 {
 	transport *t = conn->transport;
+	char *cmd_arg;
+	int ret;
 
 	FUNC_ENTRY();
-	
-	if (QUERY_FLAG(t->t_flags, (T_PORT | T_PASV))) {
+
+	if (FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) {
 		activate_nodelay(t->socket);
-		do_list(conn);
-		SET_FLAG(t->t_flags, T_KILL);
+		cmd_arg = get_cmd_arg(conn, 1);
+		if (cmd_arg)
+			/*
+			 * (gdb) p conn->recv_buf
+			 * $1 = "LIST /home/ftp/-al /etc", '\0' <repeats 4072 times>
+			 */
+			ret = is_path_ok(conn);
+
+		if (!cmd_arg || ret == 1) {
+			t->target_dir = opendir(!cmd_arg ? conn->curr_dir:cmd_arg);
+			if (t->target_dir) {
+				FD_SET(t->socket, &srv->write_ready);
+				FLAG_SET(t->t_flags, T_LIST);
+				send_cmd(conn->sock_fd, 150, "ASCII MODE");
+			}
+		}
+
+		if (!FLAG_QUERY(t->t_flags, T_LIST)) {
+			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+			FLAG_APPEND(t->t_flags, T_KILL);
+		}
+	} else {
+		send_cmd(conn->sock_fd, 550, "sorry, use PORT or PASV first");
 	}
-	
+
 	FUNC_EXIT_VOID();
 }
-
-/* static void */
-/* cmd_nlst(struct connection *conn) */
-/* { */
-/* 	FUNC_ENTRY(); */
-	
-	
-	
-/* 	FUNC_EXIT_VOID(); */
-/* } */
 
 static void
 cmd_dele(struct connection *conn)
@@ -655,9 +635,9 @@ static void
 cmd_syst(struct connection *conn)
 {
 	FUNC_ENTRY();
-	
+
 	send_cmd(conn->sock_fd, 215, "UNIX Type: L8");
-	
+
 	FUNC_EXIT_VOID();
 }
 
@@ -679,24 +659,16 @@ cmd_abor(struct connection *conn)
 	FUNC_ENTRY();
 	
 	t = conn->transport;
-	if (!QUERY_FLAG(t->t_flags, T_FREE)) {
-		SET_FLAG(t->t_flags, T_KILL);
+
+	/* if it's not FREE */
+	if (FLAG_QUERY(t->t_flags, T_FREE)) {
+		FLAG_APPEND(t->t_flags, T_KILL);
 		send_cmd(conn->sock_fd, 426, "Transport aborted.");
 	}
 	
 	send_cmd(conn->sock_fd, 226, "ABOR command processed OK.");
 	FUNC_EXIT_VOID();
 }
-
-/* static void */
-/* cmd_mode(struct connection *conn) */
-/* { */
-/* 	FUNC_ENTRY(); */
-	
-
-	
-/* 	FUNC_EXIT_VOID(); */
-/* } */
 
 static void
 cmd_help(struct connection *conn)
@@ -724,7 +696,7 @@ cmd_quit(struct connection *conn)
 	FUNC_ENTRY();
 	
 	send_cmd(conn->sock_fd, 221, "Goodbay.");
-	SET_FLAG(conn->c_flags, C_KILL);
+	FLAG_SET(conn->c_flags, C_KILL);
 	
 	FUNC_EXIT_VOID();
 }
@@ -831,64 +803,87 @@ exit:
 	FUNC_EXIT_VOID();
 }
 
-int
+void
 parse_cmd(connection *conn)
 {
 	const struct cmd_handler *h;
-	int processed = 0;
-	int buf_len;
+	struct hash_entry *entry;
+	char key[256] = {'\0'};
+	int i = 0;
 
 	FUNC_ENTRY();
 
 	/* 
 	 * remove '\r' and '\n' from the recv_buf.
 	 */
-	buf_len = strcspn(conn->recv_buf, "\r\n");
-	conn->recv_buf[buf_len] = '\0';
-	conn->recv_buf_len = buf_len; 
+	i = strcspn(conn->recv_buf, "\r\n");
+	conn->recv_buf[i] = '\0';
+	conn->recv_buf_len = i;
 
-	h = cmd_table;
+	/* get key, i.e. command name */
+	for (i = 0; conn->recv_buf[i] != ' ' && conn->recv_buf[i] != '\0'; i++) {
+		if (i < sizeof(key))
+			key[i] = conn->recv_buf[i];
+	}
 
-	do {
-		if (!strncasecmp(conn->recv_buf, h->cmd_name, h->cmd_len)) {
-			if (QUERY_FLAG(conn->c_flags, C_AUTH) ||
-			    !strncasecmp(conn->recv_buf, "USER", h->cmd_len) ||
-			    !strncasecmp(conn->recv_buf, "PASS", h->cmd_len) ||
-			    !strncasecmp(conn->recv_buf, "FEAT", h->cmd_len) ||
-			    !strncasecmp(conn->recv_buf, "QUIT", h->cmd_len))
-			{
-				/*
-				 * At first, we must set root UID and root GUID,
-				 * and than we will set what we really need on demand.
-				 */
-				reset_euid();
-				reset_egid();
+	entry = hash_lookup(srv->cmd_hash_table, key);
+	if (entry) {
+		h = (const struct cmd_handler *) entry->data;
+		if (FLAG_QUERY(conn->c_flags, C_AUTH) || !h->need_auth) {
+			/*
+			 * At first, we must set root UID and root GUID,
+			 * and than we will set what we really need on demand.
+			 */
+			reset_euid();
+			reset_egid();
 
-				/*
-				 * If a client has already logged in and root permission
-				 * really doesn't need we must change euid and egid.
-				 */
-				if (QUERY_FLAG(conn->c_flags, C_AUTH) && !h->need_root) {
-					set_egid(conn->uid);
-					set_euid(conn->gid);
-				}
-
-				h->cmd_handler(conn);
-			} else {
-				send_cmd(conn->sock_fd, 503, "You must login, at first.");
+			/*
+			 * If a client has already logged in and root permission
+			 * really doesn't need we must change euid and egid.
+			 */
+			if (FLAG_QUERY(conn->c_flags, C_AUTH) && !h->need_root) {
+				set_egid(conn->uid);
+				set_euid(conn->gid);
 			}
 
-			processed++;
-			break;
+			h->cmd_handler(conn);
+		} else {
+			send_cmd(conn->sock_fd, 503, "You must login, at first.");
 		}
-	} while ((++h)->cmd_handler != NULL);
-
-	/* if a client sends bad cmd, we let him know. */
-	if (processed == 0) {
+	} else {
 		send_cmd(conn->sock_fd, 500, "Bad cmd.");
 		PRINT_DEBUG("Bad command: %s\n", conn->recv_buf);
 	}
 
-	FUNC_EXIT_INT(processed);
-	return processed;
+	FUNC_EXIT_VOID();
 }
+
+const struct cmd_handler cmd_table[] =
+{
+	{ "USER", 1, cmd_user, 1, 0, 4 },
+	{ "PASS", 1, cmd_pass, 1, 0, 4 },
+	{ "PORT", 1, cmd_port, 1, 1, 4 },
+	{ "PASV", 0, cmd_pasv, 0, 1, 4 },
+	{ "LIST", 1, cmd_list, 1, 1, 4 },
+	{ "CDUP", 0, cmd_cdup, 0, 1, 4 },
+	{ "RETR", 1, cmd_retr, 0, 1, 4 },
+	{ "SIZE", 1, cmd_size, 0, 1, 4 },
+	{ "NOOP", 0, cmd_noop, 0, 1, 4 },
+	{ "SYST", 0, cmd_syst, 0, 0, 4 },
+	{ "TYPE", 0, cmd_type, 0, 1, 4 },
+	{ "ABOR", 0, cmd_abor, 0, 1, 4 },
+	{ "STRU", 0, cmd_stru, 0, 1, 4 },
+	{ "QUIT", 0, cmd_quit, 0, 0, 4 },
+	{ "FEAT", 0, cmd_feat, 0, 0, 4 },
+	{ "HELP", 0, cmd_help, 0, 1, 4 },
+#ifdef UPLOAD_SUPPORT
+	{ "STOR", 0, cmd_stor, 0, 1, 4 },
+	{ "DELE", 1, cmd_dele, 0, 1, 4 },
+	{ "RMD",  1, cmd_rmd, 0, 1, 3  },
+	{ "MKD",  1, cmd_mkd, 0, 1, 3  },
+#endif
+	{ "ALLO", 0, cmd_allo, 0, 1, 4 },
+	{ "PWD",  0, cmd_pwd, 0, 1, 3  },
+	{ "CWD",  1, cmd_cwd, 0, 1, 3  },
+	{ " ",    0, NULL, 0, 0, 0     }
+};
