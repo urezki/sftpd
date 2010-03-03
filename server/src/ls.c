@@ -70,6 +70,8 @@ get_file_attr(DIR *d, const char *f_name, struct stat *st)
 		ret = fstatat(dir_fd, f_name, st, AT_SYMLINK_NOFOLLOW);
 		if (ret == 0)
 			return 1;
+		else
+			PRINT_DEBUG("fstatat error: %s\n", strerror(errno));
 	}
 
 	return 0;
@@ -146,7 +148,7 @@ get_file_list_chunk(DIR *dir, int nfiles, int short_list)
 					/* build the line */
 					len += snprintf(line, sizeof(line) - 1, "%s%4u %-*u  %-*u %*ld %s %s\r\n",
 									perm, (unsigned int) st.st_nlink, MAX_UID_LEN, st.st_uid,
-									MAX_GID_LEN, st.st_gid, 7, st.st_size, mtime, d->d_name);
+									MAX_GID_LEN, st.st_gid, 10, st.st_size, mtime, d->d_name);
 				} else {
 					len += snprintf(line, sizeof(line) - 1, "%s\r\n", d->d_name);
 				}
