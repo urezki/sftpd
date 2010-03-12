@@ -18,11 +18,6 @@
 #define T_ACPT	0x00000040		/* accepting */
 #define T_KILL	0x00000080
 
-/* flags for LIST cmd */
-#define L_CURR	0x00000001		/* list current folder */
-#define L_ABSL	0x00000002		/* list absolute folder */
-#define L_FILE	0x00000004		/* list one file */
-
 #define FLAG_SET(X,Y)		(X = (X^X) | Y)
 #define FLAG_APPEND(X,Y)	(X = (X | Y))
 #define FLAG_QUERY(X,Y)		(X & Y)
@@ -65,6 +60,7 @@ struct transport {
 	/*
 	 * for LIST/NLST cmd
 	 */
+	struct list_opt l_opt;
 	DIR *target_dir;
 };
 

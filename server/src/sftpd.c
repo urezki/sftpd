@@ -19,11 +19,11 @@
 #include <sock_utils.h>
 #include <signal_ruling.h>
 #include <debug.h>
+#include <ls.h>
 #include <sftpd.h>
 #include <cmds.h>
 #include <hash.h>
 #include <mem.h>
-#include <ls.h>
 
 #define PID_FILE "/var/run/sftpd.pid"
 #define DEV_NULL "/dev/null"

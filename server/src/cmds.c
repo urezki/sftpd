@@ -22,11 +22,11 @@
 #include <sock_utils.h>
 #include <utils.h>
 #include <debug.h>
+#include <ls.h>
 #include <sftpd.h>
 #include <cmds.h>
 #include <hash.h>
 #include <mem.h>
-#include <ls.h>
 
 static int
 translate_path(const char *root, const char *cur, char *dst)
@@ -77,6 +77,56 @@ translate_path(const char *root, const char *cur, char *dst)
 
 	snprintf(dst, PATH_MAX, "%s", absolute_path);
 	return 0;
+}
+
+static void
+get_abs_path(const char *root, const char *cur, const char *path, char *abs_path)
+{
+	char absolute_path[PATH_MAX] = {'\0'};
+	char tmp_path[PATH_MAX] = {'\0'};
+	char *dot;
+	int n;
+
+	if (root == NULL || cur == NULL || path == NULL || abs_path == NULL)
+		return;
+
+	if (*path == '/' || *path == '~') {
+		/* 1) cd / 2) cd ~/ 3) cd ~ */
+		n = snprintf(absolute_path, PATH_MAX, "%s%s", root,
+					 *(path + 1) == '/' ? path + 2 : path + 1);
+	} else {
+		/* 1) cd foo/ */
+		n = snprintf(absolute_path, PATH_MAX, "%s%s", cur, path);
+	}
+
+	/* /home/urezki/../ftp/.. */
+	if ((dot = strrchr(absolute_path, '.')))
+		if (*(dot - 1) == '.' && *(dot + 1) == '\0')
+			strcat(absolute_path, "/");
+
+	/*
+	 * Here we can have following combinations:
+	 * 1) /home/urezki/../ftp/../
+	 * 2) /home/urezki/
+	 */
+	while ((dot = strstr(absolute_path, "/../"))) {
+		char *s_pp = NULL;
+
+		if (dot == absolute_path)
+			s_pp = dot;
+		else
+			s_pp = (dot - 1);
+
+		while (s_pp != absolute_path && *s_pp != '/')
+			s_pp--;
+
+		*(s_pp + 1) = '\0';
+
+		snprintf(tmp_path, PATH_MAX, "%s%s", absolute_path, dot + 4);
+		snprintf(absolute_path, PATH_MAX, "%s", tmp_path);
+	}
+
+	snprintf(abs_path, PATH_MAX, "%s", absolute_path);
 }
 
 static char *
@@ -130,6 +180,32 @@ is_path_ok(struct connection *conn)
 		return 1;
 
 fail:
+	return 0;
+}
+
+static int
+check_abs_path(const char *root_dir, char *abs_path)
+{
+	struct stat st;
+
+	/* check for symbolic links */
+	if (stat(abs_path, &st) != -1) {
+		if (!S_ISLNK(st.st_mode)) {
+			char buf[1024] = {'\0'};
+			int len;
+
+			len = readlink(abs_path, buf, sizeof(buf) - 1);
+			if (len != -1) {
+				buf[len] = '\0';
+				*abs_path = '\0';
+				strcat(abs_path, buf);
+			}
+		}
+	}
+
+	if (!strncmp(abs_path, root_dir, strlen(root_dir)))
+		return 1;
+
 	return 0;
 }
 
@@ -548,54 +624,124 @@ cmd_size(struct connection *conn)
 	FUNC_EXIT_VOID();
 }
 
-/*
- * If the pathname specifies a directory or other group of files,
- * the server should transfer a list of files in the specified
- * directory. If the pathname specifies a file then the server
- * should send current information on the file. A null argument
- * implies the user's current working or default directory.
- * The data transfer is over the data connection in type ASCII
- * or type EBCDIC.
- *
- * See RFC-959
- */
+/* /\* */
+/*  * If the pathname specifies a directory or other group of files, */
+/*  * the server should transfer a list of files in the specified */
+/*  * directory. If the pathname specifies a file then the server */
+/*  * should send current information on the file. A null argument */
+/*  * implies the user's current working or default directory. */
+/*  * The data transfer is over the data connection in type ASCII */
+/*  * or type EBCDIC. */
+/*  * */
+/*  * See RFC-959 */
+/*  *\/ */
+/* static void */
+/* cmd_list(struct connection *conn) */
+/* { */
+/* 	transport *t = conn->transport; */
+/* 	char *cmd_arg; */
+/* 	int ret; */
+
+/* 	FUNC_ENTRY(); */
+
+/* 	if (FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) { */
+/* 		activate_nodelay(t->socket); */
+/* 		cmd_arg = get_cmd_arg(conn, 1); */
+/* 		if (cmd_arg) */
+/* 			/\* */
+/* 			 * (gdb) p conn->recv_buf */
+/* 			 * $1 = "LIST /home/ftp/-al /etc", '\0' <repeats 4072 times> */
+/* 			 *\/ */
+/* 			ret = is_path_ok(conn); */
+
+/* 		if (!cmd_arg || ret == 1) { */
+/* 			t->target_dir = opendir(!cmd_arg ? conn->curr_dir:cmd_arg); */
+/* 			if (t->target_dir) { */
+/* 				FD_SET(t->socket, &srv->write_ready); */
+/* 				FLAG_SET(t->t_flags, T_LIST); */
+/* 				send_cmd(conn->sock_fd, 150, "ASCII MODE"); */
+/* 			} */
+/* 		} */
+
+/* 		if (!FLAG_QUERY(t->t_flags, T_LIST)) { */
+/* 			send_cmd(conn->sock_fd, 550, "%s", strerror(errno)); */
+/* 			FLAG_APPEND(t->t_flags, T_KILL); */
+/* 		} */
+/* 	} else { */
+/* 		send_cmd(conn->sock_fd, 550, "sorry, use PORT or PASV first"); */
+/* 	} */
+
+/* 	FUNC_EXIT_VOID(); */
+/* } */
+
 static void
 cmd_list(struct connection *conn)
 {
-	transport *t = conn->transport;
-	char *cmd_arg;
+	char abs_path[PATH_MAX] = {'\0'};
+	struct stat st;
+	transport *t;
+	char *arg;
 	int ret;
 
-	FUNC_ENTRY();
+	t = conn->transport;
 
 	if (FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) {
-		activate_nodelay(t->socket);
-		cmd_arg = get_cmd_arg(conn, 1);
-		if (cmd_arg)
-			/*
-			 * (gdb) p conn->recv_buf
-			 * $1 = "LIST /home/ftp/-al /etc", '\0' <repeats 4072 times>
-			 */
-			ret = is_path_ok(conn);
+		int list_curr_folder = -1;
+		int list_folder = -1;
+		int list_file = -1;
 
-		if (!cmd_arg || ret == 1) {
-			t->target_dir = opendir(!cmd_arg ? conn->curr_dir:cmd_arg);
+		arg = strrchr(conn->recv_buf, ' '); /* last */
+		if (arg) {
+			if (*(arg + 1) != '-') { /* LIST -al */
+				get_abs_path(conn->root_dir, conn->curr_dir, arg + 1, abs_path);
+				ret = check_abs_path(conn->root_dir, abs_path);
+				if (ret) {
+					ret = stat(abs_path, &st);
+					if (ret == 0) {
+						if (S_ISDIR(st.st_mode))
+							list_folder = 1;
+						else
+							list_file = 1;
+					}
+				}
+			} else {
+				list_curr_folder = 1;
+			}
+		} else {
+			list_curr_folder = 1;
+		}
+
+		if (list_folder == 1 || list_curr_folder == 1) {
+			t->target_dir = opendir(list_curr_folder == 1 ? conn->curr_dir:abs_path);
 			if (t->target_dir) {
 				FD_SET(t->socket, &srv->write_ready);
 				FLAG_SET(t->t_flags, T_LIST);
 				send_cmd(conn->sock_fd, 150, "ASCII MODE");
+			} else {
+				send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+				FLAG_APPEND(t->t_flags, T_KILL);
 			}
-		}
+		} else if (list_file == 1) {
+			char line[400] = {'\0'};
 
-		if (!FLAG_QUERY(t->t_flags, T_LIST)) {
+			send_cmd(conn->sock_fd, 150, "ASCII MODE");
+			ret = stat(abs_path, &st);
+			if (ret == 0) {
+				ret = build_list_line(arg + 1, &st, line, sizeof(line), 0);
+				if (ret > 0)
+					(void) write(t->socket, line, ret);
+			}
+
+			send_cmd(conn->sock_fd, ret > 0 ? 226:550, ret > 0 ? "Transfer complete.":strerror(errno));
+			FLAG_APPEND(t->t_flags, T_KILL);
+ 		} else {
+			errno = ENOENT;
 			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
 			FLAG_APPEND(t->t_flags, T_KILL);
 		}
 	} else {
 		send_cmd(conn->sock_fd, 550, "sorry, use PORT or PASV first");
 	}
-
-	FUNC_EXIT_VOID();
 }
 
 static void
