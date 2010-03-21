@@ -180,4 +180,3 @@ get_file_list_chunk(DIR *dir, int nfiles, int short_list)
 	free(chunk);
 	return NULL;
 }
-

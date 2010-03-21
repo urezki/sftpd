@@ -263,7 +263,8 @@ destroy_transport(connection *conn)
 				BUG();
 			}
 
-			closedir(t->target_dir);
+			if (t->l_opt.target_dir)
+				closedir(t->l_opt.target_dir);
 		} else if (FLAG_QUERY(t->t_flags, (T_RETR | T_STOR))) {
 			/* downloading or uploading */
 			if (t->socket >= 0) {
@@ -592,22 +593,30 @@ static void
 list_folder(struct connection *c)
 {
 	struct transport *t;
+	int is_nlst;
 	char *list;
 
-	FUNC_ENTRY();
-
 	t = c->transport;
+	is_nlst = FLAG_QUERY(t->l_opt.l_flags, L_NLST);
 
-	list = get_file_list_chunk(t->target_dir, 300, 0);
+	if (FLAG_QUERY(t->l_opt.l_flags, L_FOLD)) {
+		if (t->l_opt.target_dir == NULL) {
+			t->l_opt.target_dir = opendir(t->l_opt.path);
+			if (t->l_opt.target_dir == NULL)
+				goto leave;
+		}
+	}
+
+	list = get_file_list_chunk(t->l_opt.target_dir, 300, is_nlst);
 	if (list) {
 		send_data(t->socket, list, strlen(list), 0);
 		free(list);
-	} else {
-		send_cmd(c->sock_fd, 226, "ASCII Transfer complete");
-		FLAG_APPEND(t->t_flags, T_KILL);
+		return;
 	}
 
-	FUNC_EXIT_VOID();
+leave:
+	send_cmd(c->sock_fd, 226, "ASCII Transfer complete");
+	FLAG_APPEND(t->t_flags, T_KILL);
 }
 
 static void

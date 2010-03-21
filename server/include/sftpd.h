@@ -61,7 +61,6 @@ struct transport {
 	 * for LIST/NLST cmd
 	 */
 	struct list_opt l_opt;
-	DIR *target_dir;
 };
 
 struct ftpd {
