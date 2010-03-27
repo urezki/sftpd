@@ -593,8 +593,10 @@ static void
 list_folder(struct connection *c)
 {
 	struct transport *t;
+	struct stat st;
 	int is_nlst;
 	char *list;
+	int ret;
 
 	t = c->transport;
 	is_nlst = FLAG_QUERY(t->l_opt.l_flags, L_NLST);
@@ -605,6 +607,16 @@ list_folder(struct connection *c)
 			if (t->l_opt.target_dir == NULL)
 				goto leave;
 		}
+	} else if (FLAG_QUERY(t->l_opt.l_flags, L_FILE)) {
+		char *arg = strrchr(c->recv_buf, ' ');
+		char line[400] = {'\0'};
+
+		(void) stat(t->l_opt.path, &st); /* don't need !!!!!!!!! */
+		ret = build_list_line(arg + 1, &st, line, sizeof(line), is_nlst);
+		if (ret > 0)
+			(void) write(t->socket, line, ret);
+
+		goto leave;
 	}
 
 	list = get_file_list_chunk(t->l_opt.target_dir, 300, is_nlst);

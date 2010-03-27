@@ -632,75 +632,73 @@ cmd_size(struct connection *conn)
  * the user's current working or default directory.
  */
 static void
-cmd_list(struct connection *conn)
+cmd_list(struct connection *c)
 {
 	char path[PATH_MAX] = {'\0'};
-	char line[400] = {'\0'};
 	struct stat st;
 	transport *t;
-	int is_nlst;
 	char *arg;
 	int ret;
 
-	t = conn->transport;
+	t = c->transport;
 
-	if (FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) {
-		bzero((void *)&t->l_opt, sizeof(t->l_opt));
-		if (!strncmp(conn->recv_buf, "NLST", 4))
-			FLAG_SET(t->l_opt.l_flags, L_NLST);
+	if (!FLAG_QUERY(t->t_flags, (T_PORT | T_PASV)))
+		goto use_port_or_pasv;
 
-		/* copy current folder at first, it may be changed below */
-		(void) strncpy(t->l_opt.path, conn->curr_dir, sizeof(t->l_opt.path));
+	arg = strrchr(c->recv_buf, ' ');
+	if (arg == NULL || *(arg + 1) == '-') {
+		ret = snprintf(t->l_opt.path, sizeof(t->l_opt.path) - 1, "%s", c->curr_dir);
+		if (ret > 0)
+			t->l_opt.path[ret] = '\0';
 
-		/* get last argument */
-		arg = strrchr(conn->recv_buf, ' ');
-		if (arg) {
-			if (*(arg + 1) != '-') { /* LIST -al */
-				get_abs_path(conn->root_dir, conn->curr_dir, arg + 1, path);
-				ret = check_abs_path(conn->root_dir, path);
-				if (ret) {
-					ret = stat(path, &st);
-					if (ret == 0) {
-						if (S_ISDIR(st.st_mode))
-							FLAG_APPEND(t->l_opt.l_flags, L_FOLD);
-						else
-							FLAG_APPEND(t->l_opt.l_flags, L_FILE);
-
-						(void) strncpy(t->l_opt.path, path, sizeof(t->l_opt.path));
-					}
-				}
-			} else {
-				FLAG_APPEND(t->l_opt.l_flags, L_FOLD);
-			}
-		} else {
-			FLAG_APPEND(t->l_opt.l_flags, L_FOLD);
-		}
-
-		if (FLAG_QUERY(t->l_opt.l_flags, (L_FOLD | L_FILE))) {
-			send_cmd(conn->sock_fd, 150, "ASCII MODE");
-			if (FLAG_QUERY(t->l_opt.l_flags, L_FILE)) {
-				is_nlst = FLAG_QUERY(t->l_opt.l_flags, L_NLST);
-				ret = build_list_line(arg + 1, &st, line, sizeof(line), is_nlst);
-				if (ret > 0)
-					(void) write(t->socket, line, ret);
-
-				send_cmd(conn->sock_fd, 226, "ASCII Transfer complete");
-				FLAG_APPEND(t->t_flags, T_KILL);
-				return;
-			}
-
-			FD_SET(t->socket, &srv->write_ready);
-			FLAG_SET(t->t_flags, T_LIST);
-			return;
-
-		}
-
-		errno = ENOENT;
-		send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
-		FLAG_APPEND(t->t_flags, T_KILL);
-	} else {
-		send_cmd(conn->sock_fd, 550, "sorry, use PORT or PASV first");
+		FLAG_APPEND(t->l_opt.l_flags, L_FOLD);
+		goto start_ascii_mode;
 	}
+
+	get_abs_path(c->root_dir, c->curr_dir, arg + 1, path);
+	ret = check_abs_path(c->root_dir, path);
+	if (ret == 0)
+		goto outside_chroot;
+
+	ret = stat(path, &st);
+	if (ret != 0)
+		goto stat_call_error;
+
+	ret = snprintf(t->l_opt.path, sizeof(t->l_opt.path) - 1, "%s", path);
+	if (ret > 0)
+		t->l_opt.path[ret] = '\0';
+
+	if (S_ISDIR(st.st_mode)) {
+		FLAG_APPEND(t->l_opt.l_flags, L_FOLD);
+	} else {
+		FLAG_APPEND(t->l_opt.l_flags, L_FILE);
+	}
+
+start_ascii_mode:
+	send_cmd(c->sock_fd, 150, "ASCII MODE");
+	FD_SET(t->socket, &srv->write_ready);
+	FLAG_SET(t->t_flags, T_LIST);
+	return;
+
+use_port_or_pasv:
+	send_cmd(c->sock_fd, 550, "sorry, use PORT or PASV first");
+	return;
+
+outside_chroot:
+	errno = ENOENT;
+stat_call_error:
+	send_cmd(c->sock_fd, 550, "%s", strerror(errno));
+	FLAG_APPEND(t->t_flags, T_KILL);
+	return;
+}
+
+static void
+cmd_nlst(struct connection *c)
+{
+	transport *t = c->transport;
+
+	FLAG_SET(t->l_opt.l_flags, L_NLST);
+	return cmd_list(c);
 }
 
 static void
@@ -970,7 +968,7 @@ const struct cmd_handler cmd_table[] =
 	{ "PORT", 1, cmd_port, 1, 1, 4 },
 	{ "PASV", 0, cmd_pasv, 0, 1, 4 },
 	{ "LIST", 1, cmd_list, 1, 1, 4 },
-	{ "NLST", 1, cmd_list, 1, 1, 4 },
+	{ "NLST", 1, cmd_nlst, 1, 1, 4 },
 	{ "CDUP", 0, cmd_cdup, 0, 1, 4 },
 	{ "RETR", 1, cmd_retr, 0, 1, 4 },
 	{ "SIZE", 1, cmd_size, 0, 1, 4 },
