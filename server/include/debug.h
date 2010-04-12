@@ -4,7 +4,7 @@
 /* just causes a Segmentation Fault */
 #define BUG() (*(int *)0 = 0)
 
-#define __DEBUG_MSG__
+//#define __DEBUG_MSG__
 //#define __DEBUG_FUNC__
 
 #ifdef __DEBUG_MSG__		  /* DEBUG MSG */

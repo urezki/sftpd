@@ -635,7 +635,6 @@ static void
 cmd_list(struct connection *c)
 {
 	char path[PATH_MAX] = {'\0'};
-	struct stat st;
 	transport *t;
 	char *arg;
 	int ret;
@@ -660,7 +659,7 @@ cmd_list(struct connection *c)
 	if (ret == 0)
 		goto outside_chroot;
 
-	ret = stat(path, &st);
+	ret = stat(path, &t->l_opt.st);
 	if (ret != 0)
 		goto stat_call_error;
 
@@ -668,7 +667,7 @@ cmd_list(struct connection *c)
 	if (ret > 0)
 		t->l_opt.path[ret] = '\0';
 
-	if (S_ISDIR(st.st_mode)) {
+	if (S_ISDIR(t->l_opt.st.st_mode)) {
 		FLAG_APPEND(t->l_opt.l_flags, L_FOLD);
 	} else {
 		FLAG_APPEND(t->l_opt.l_flags, L_FILE);

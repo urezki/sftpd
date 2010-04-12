@@ -113,7 +113,6 @@ hash_destroy(struct hash *h)
 			h->hash_table[i] = NULL;
 		}
 
-		free(h->hash_table);
 		free(h);
 	}
 }
@@ -202,17 +201,14 @@ hash_create(int table_size)
 	int i;
 
 	if (table_size > 0) {
-		h = (struct hash *) calloc(1, sizeof(struct hash));
+		h = (struct hash *) calloc(1, sizeof(struct hash) + sizeof(void *) * (table_size + 1));
 		if (h) {
-			h->hash_table = (hash_entry **) calloc(table_size + 1, sizeof(hash_entry *));
-			if (h->hash_table) {
-				for (i = 0; i < table_size; i++)
-					h->hash_table[i] = NULL;
+			for (i = 0; i < table_size; i++)
+				h->hash_table[i] = NULL;
 
-				h->hash_table[i] = (hash_entry *) POISONED;
-				h->hash_size = table_size;
-				return h;
-			}
+			h->hash_table[i] = (hash_entry *) POISONED;
+			h->hash_size = table_size;
+			return h;
 		}
 	}
 

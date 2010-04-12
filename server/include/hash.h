@@ -14,8 +14,8 @@ typedef struct hash_entry {
 } hash_entry;
 
 typedef struct hash {
-	struct hash_entry **hash_table;
 	unsigned int hash_size;
+	void *hash_table[0];
 } hash;
 
 extern struct hash *hash_create(int);

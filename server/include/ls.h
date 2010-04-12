@@ -8,6 +8,7 @@
 
 struct list_opt {
 	char path[PATH_MAX];
+	struct stat st;
 	void *target_dir;
 	int l_flags;
 };

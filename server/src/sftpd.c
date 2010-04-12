@@ -293,8 +293,6 @@ destroy_transport(connection *conn)
 
 		if (t->socket >= 0)
 			close_socket(t->socket);
-		else
-			BUG();
 
 		/* clean transport before next using */
 		bzero(t, sizeof(transport));
@@ -593,7 +591,6 @@ static void
 list_folder(struct connection *c)
 {
 	struct transport *t;
-	struct stat st;
 	int is_nlst;
 	char *list;
 	int ret;
@@ -611,8 +608,7 @@ list_folder(struct connection *c)
 		char *arg = strrchr(c->recv_buf, ' ');
 		char line[400] = {'\0'};
 
-		(void) stat(t->l_opt.path, &st); /* don't need !!!!!!!!! */
-		ret = build_list_line(arg + 1, &st, line, sizeof(line), is_nlst);
+		ret = build_list_line(arg + 1, &t->l_opt.st, line, sizeof(line), is_nlst);
 		if (ret > 0)
 			(void) write(t->socket, line, ret);
 
