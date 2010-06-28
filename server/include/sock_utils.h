@@ -19,5 +19,6 @@ extern int get_ipv4_socket(void);
 extern int get_ipv6_socket(void);
 extern void close_socket(int);
 extern int check_socket(int);
+extern int bytes_available(int);
 
 #endif

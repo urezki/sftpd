@@ -13,6 +13,8 @@
 #include <signal.h>
 #include <sys/sendfile.h>
 #include <dirent.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 /* local headers */
 #include <list.h>
@@ -140,6 +142,7 @@ init_daemon(void)
 static ftpd *
 init_sftpd(int argc, char **argv)
 {
+	struct rlimit rlim;
 	ftpd *sftpd = NULL;
 	int fork_flag = 0;
 	int ret;
@@ -164,6 +167,12 @@ init_sftpd(int argc, char **argv)
 
 	if (fork_flag)
 		init_daemon();
+
+	rlim.rlim_cur = RLIM_INFINITY;
+	rlim.rlim_max = RLIM_INFINITY;
+	ret = setrlimit(RLIMIT_CORE, &rlim);
+	if (ret)
+		PRINT_DEBUG("'setrlimit()' failed with error: %s\n", strerror(errno));
 
 	signal_handle(SIGHUP);
 	signal_handle(SIGTERM);
@@ -467,6 +476,7 @@ process_commands(fd_set *r_fd, int *n_ready)
 		/* skip sockets which are not ready */
 		if (!FD_ISSET(c->sock_fd, r_fd))
 			continue;
+
 		/*
 		 * If we want to remove connection from the list
 		 * and free memory which was allocated, we must
@@ -475,7 +485,7 @@ process_commands(fd_set *r_fd, int *n_ready)
 		if (FLAG_QUERY(c->c_flags, C_KILL))
 			continue;
 
-		ioctl(c->sock_fd, FIONREAD, &avail_b);
+		avail_b = bytes_available(c->sock_fd);
 		if (avail_b > 0 && avail_b < RECV_BUF_SIZE) {
 			int read_count;
 

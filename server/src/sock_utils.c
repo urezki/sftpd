@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/ioctl.h>
 #include <errno.h>
 
 /* local headers */
@@ -475,4 +476,15 @@ deactivate_nonblock(int s)
 				  errno, strerror(errno));
 	
 	FUNC_EXIT_VOID();
+}
+
+int
+bytes_available(int sock)
+{
+	int bytes;
+
+	if (ioctl(sock, FIONREAD, &bytes) >= 0)
+		return bytes;
+
+	return 0;
 }
