@@ -39,6 +39,27 @@ struct connection {
 	int c_flags;
 
 	struct transport *transport;
+	struct data_channel {
+		struct sockaddr_in r_info;
+		struct stat st;
+
+		int listen_socket;
+		int socket;
+
+		int data_port;
+
+		int local_fd;
+		off_t offset;
+
+		/* state */
+		int t_flags;
+
+		/*
+		 * for LIST/NLST cmd
+		 */
+		struct list_opt l_opt;
+	} dc;
+
 	TAILQ_ENTRY(connection) entries;
 };
 
@@ -64,17 +85,18 @@ struct transport {
 };
 
 struct ftpd {
-	struct hash *cmd_hash_table;
+	struct hash *cmd_table;
 	unsigned int client_count;
 	fd_set write_ready;
 	fd_set read_ready;
 	int srv_socket;
+
+	/* all clients are linked to the list */
+	TAILQ_HEAD(cl_list, connection) client_list;
 };
 
 typedef struct connection connection;
 typedef struct transport transport;
 typedef struct ftpd ftpd;
-
-extern struct ftpd *srv;
 
 #endif  /* __FTPD_H__ */

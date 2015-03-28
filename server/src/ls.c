@@ -1,5 +1,6 @@
 #define _ATFILE_SOURCE
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -143,40 +144,42 @@ build_list_line(const char *name, struct stat *st, char *line, int l_size, int s
 char *
 get_file_list_chunk(DIR *dir, int nfiles, int short_list)
 {
-	struct dirent *d;
+	struct dirent *d = NULL;
 	char line[400] = {'\0'};
-	char *chunk;
+	char *chunk = NULL;
 	int len = 0;
 
 	if (nfiles > 0) {
-		chunk = (char *)calloc(nfiles * sizeof(line), sizeof(char));
+		chunk = (char *) calloc(nfiles * sizeof(line), sizeof(char));
 		if (chunk == NULL)
 			FATAL_ERROR("error: %s\n", strerror(errno));
-	}
 
-	for (int i = 0; i < nfiles && nfiles > 0; i++) {
-		d = get_dirent_entry(dir);
-		if (d != NULL) {
-			struct stat st;
-			int ret;
+		for (int i = 0; i < nfiles; i++) {
+			d = get_dirent_entry(dir);
+			if (d != NULL) {
+				struct stat st;
+				int ret;
 
-			ret = get_file_attr(dir, d->d_name, &st);
-			if (ret) {
-				if (short_list == 0) {
-					len += build_list_line(d->d_name, &st, line, sizeof(line), 0);
-				} else {
-					len += build_list_line(d->d_name, &st, line, sizeof(line), 1);
+				ret = get_file_attr(dir, d->d_name, &st);
+				if (ret) {
+					if (short_list == 0) {
+						len += build_list_line(d->d_name, &st, line, sizeof(line), 0);
+					} else {
+						len += build_list_line(d->d_name, &st, line, sizeof(line), 1);
+					}
+
+					/* attach to the chunk */
+					(void) strcat(chunk, line);
 				}
-
-				/* attach to the chunk */
-				(void) strcat(chunk, line);
 			}
 		}
+
+		if (len > 0)
+			return chunk;
 	}
 
-	if (len > 0)
-		return chunk;
+	if (chunk)
+		free(chunk);
 
-	free(chunk);
 	return NULL;
 }

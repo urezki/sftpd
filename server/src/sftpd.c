@@ -23,20 +23,13 @@
 #include <debug.h>
 #include <ls.h>
 #include <sftpd.h>
+#include <workqueue.h>
 #include <cmds.h>
 #include <hash.h>
 #include <mem.h>
 
 #define PID_FILE "/var/run/sftpd.pid"
 #define DEV_NULL "/dev/null"
-
-/*
- * Head of the client list
- */
-static TAILQ_HEAD(cli_list, connection) conn_list;
-
-/* global variable */
-struct ftpd *srv = NULL;
 
 static void
 print_usage(char **argv)
@@ -140,7 +133,7 @@ init_daemon(void)
 }
 
 static ftpd *
-init_sftpd(int argc, char **argv)
+sftpd_probe(int argc, char **argv)
 {
 	struct rlimit rlim;
 	ftpd *sftpd = NULL;
@@ -188,20 +181,16 @@ init_sftpd(int argc, char **argv)
 	 * have approximately 29 FTP commands, by this way
 	 * we tend to avoid collisions.
 	 */
-	sftpd->cmd_hash_table = hash_create(100);
-	if (sftpd->cmd_hash_table == NULL)
+	sftpd->cmd_table = hash_create(100);
+	if (sftpd->cmd_table == NULL)
 		FATAL_ERROR("error allocating memory\n");
 
 	/* adding to hash commands and their handlers */
 	for (int i = 0; cmd_table[i].cmd_handler; i++) {
-		ret = hash_add(sftpd->cmd_hash_table, cmd_table[i].cmd_name, (void *)&cmd_table[i]);
+		ret = hash_add(sftpd->cmd_table, cmd_table[i].cmd_name, (void *)&cmd_table[i]);
 		if (ret == 0)
 			FATAL_ERROR("error adding to the hash\n");
 	}
-
-	/* init some stuff */
-	sftpd->client_count = 0;
-	sftpd->srv_socket = -1;
 
 	sftpd->srv_socket = start_tcp_listen(21, 4, 30);
 	if (sftpd->srv_socket == -1)
@@ -212,37 +201,37 @@ init_sftpd(int argc, char **argv)
 	FD_SET(sftpd->srv_socket, &(sftpd->read_ready));
 
 	/* initialize list */
-	TAILQ_INIT(&conn_list);
+	TAILQ_INIT(&sftpd->client_list);
 
 	FUNC_EXIT_PTR(sftpd);
 	return sftpd;
 }
 
 static connection *
-add_connection(int s)
+add_connection(struct ftpd *srv, int s)
 {
-	struct connection *new_conn = NULL;
+	struct connection *new = NULL;
 	struct transport *tr = NULL;
 
 	FUNC_ENTRY();
 
 	if (srv->client_count < FD_SETSIZE) {
-		/* adding new client's socket */
-		FD_SET(s, &(srv->read_ready));
-
-		new_conn = (connection *) calloc(1, sizeof(connection));
+		new = (connection *) calloc(1, sizeof(connection));
 		tr = (transport *) calloc(1, sizeof(transport));
-		if (new_conn == NULL || tr == NULL)
+		if (new == NULL || tr == NULL)
 			FATAL_ERROR("error allocating memory\n");
 
-		new_conn->c_atime = time(NULL);
-		new_conn->sock_fd = s;
-		new_conn->c_flags = 0;	/* reset flag */
+		new->c_atime = time(NULL);
+		new->sock_fd = s;
+		new->c_flags = 0;	/* reset flag */
 
 		FLAG_SET(tr->t_flags, T_FREE);
-		new_conn->transport = tr;
+		new->transport = tr;
 
-		TAILQ_INSERT_TAIL(&conn_list, new_conn, entries);
+		TAILQ_INSERT_TAIL(&srv->client_list, new, entries);
+
+		/* add new client's socket */
+		FD_SET(new->sock_fd, &(srv->read_ready));
 		srv->client_count++;
 	} else {
 		PRINT_DEBUG("There are %d connections, it's too much\n",
@@ -251,12 +240,12 @@ add_connection(int s)
 		close_socket(s);
 	}
 
-	FUNC_EXIT_PTR(new_conn);
-	return new_conn;
+	FUNC_EXIT_PTR(new);
+	return new;
 }
 
 static void
-destroy_transport(connection *conn)
+destroy_transport(struct ftpd *srv, connection *conn)
 {
 	struct transport *t;
 
@@ -312,13 +301,13 @@ destroy_transport(connection *conn)
 }
 
 static void
-destroy_connection(connection *conn)
+destroy_connection(struct ftpd *srv, connection *conn)
 {
 	struct connection *c;
 
 	FUNC_ENTRY();
 
-	TAILQ_FOREACH(c, &conn_list, entries) {
+	TAILQ_FOREACH(c, &srv->client_list, entries) {
 		if (c == conn) {
 			if (FD_ISSET(conn->sock_fd, &(srv->read_ready)))
 				FD_CLR(conn->sock_fd, &(srv->read_ready));
@@ -327,8 +316,8 @@ destroy_connection(connection *conn)
 
 			close_socket(conn->sock_fd);
 			srv->client_count--;
-			TAILQ_REMOVE(&conn_list, c, entries);
-			destroy_transport(conn);
+			TAILQ_REMOVE(&srv->client_list, c, entries);
+			destroy_transport(srv, conn);
 			free(conn->transport);
 			free(conn);
 			break;	  /* !!! */
@@ -339,7 +328,7 @@ destroy_connection(connection *conn)
 }
 
 static void
-accept_connection(int socket, fd_set *r_fd, int *n_ready)
+accept_connection(struct ftpd *srv, int socket, fd_set *r_fd, int *n_ready)
 {
 	struct sockaddr_in r_addr;
 	connection *conn = NULL;
@@ -356,7 +345,7 @@ accept_connection(int socket, fd_set *r_fd, int *n_ready)
 		conn_fd = accept(socket, (struct sockaddr *)&r_addr, &cli_len);
 		if (conn_fd != -1) {
 			activate_nodelay(conn_fd);
-			conn = add_connection(conn_fd);
+			conn = add_connection(srv, conn_fd);
 			if (conn != NULL)
 				send_cmd(conn->sock_fd, 220, "I'm ready");
 		} else {
@@ -368,31 +357,36 @@ accept_connection(int socket, fd_set *r_fd, int *n_ready)
 }
 
 static void
-check_received_signals()
+sftpd_quit(struct ftpd *srv)
 {
-	if (signal_is_pending(SIGTERM) || signal_is_pending(SIGHUP)) {
-		struct connection *c;
+	struct connection *c;
 
-		TAILQ_FOREACH(c, &conn_list, entries) {
-			destroy_connection(c);
-		}
-
-		unlink_pid_file(PID_FILE);
-		hash_destroy(srv->cmd_hash_table);
-		close(srv->srv_socket);
-		free(srv);
-		exit(1);				/* finish up */
+	TAILQ_FOREACH(c, &srv->client_list, entries) {
+		destroy_connection(srv, c);
 	}
+
+	unlink_pid_file(PID_FILE);
+	hash_destroy(srv->cmd_table);
+	close(srv->srv_socket);
+	free(srv);
+	exit(1);				/* finish up */
+}
+
+static void
+handle_pending_signals(struct ftpd *srv)
+{
+	if (signal_is_pending(SIGTERM) || signal_is_pending(SIGHUP))
+		sftpd_quit(srv);
 }
 
 static int
-wait_for_events(ftpd *sftpd, fd_set *r_fd, fd_set *w_fd, int sec)
+wait_for_events(ftpd *srv, fd_set *r_fd, fd_set *w_fd, int sec)
 {
 	struct timeval time;
 	int n_ready;
 
-	*r_fd = sftpd->read_ready;
-	*w_fd = sftpd->write_ready;
+	*r_fd = srv->read_ready;
+	*w_fd = srv->write_ready;
 
 	time.tv_sec = sec;
 	time.tv_usec = 0;
@@ -412,7 +406,7 @@ wait_for_events(ftpd *sftpd, fd_set *r_fd, fd_set *w_fd, int sec)
 			 * bad descriptor(s) in the sets. So, find them
 			 * and kill.
 			 */
-			TAILQ_FOREACH(c, &conn_list, entries) {
+			TAILQ_FOREACH(c, &srv->client_list, entries) {
 				t = c->transport;
 
 				ret = check_socket(c->sock_fd);
@@ -436,7 +430,7 @@ wait_for_events(ftpd *sftpd, fd_set *r_fd, fd_set *w_fd, int sec)
 }
 
 static int
-process_timeouted_sockets(int time_m)
+process_timeouted_sockets(struct ftpd *srv, int time_m)
 {
 	struct connection *c;
 	int processed = 0;
@@ -448,7 +442,7 @@ process_timeouted_sockets(int time_m)
 	now = time(NULL);
 	allow_time = time_m * 60;
 
-	TAILQ_FOREACH(c, &conn_list, entries) {
+	TAILQ_FOREACH(c, &srv->client_list, entries) {
 		if (difftime(now, c->c_atime) > allow_time) {
 			if (!FLAG_QUERY(c->c_flags, C_KILL)) {
 				send_cmd(c->sock_fd, 421, "Timeout! Closing connection.");
@@ -464,15 +458,16 @@ process_timeouted_sockets(int time_m)
 }
 
 static void
-process_commands(fd_set *r_fd, int *n_ready)
+process_commands(struct ftpd *srv, fd_set *r_fd, int *n_ready)
 {
 	struct connection *c;
 	int processed = 0;
 	int avail_b;
+	int n;
 
 	FUNC_ENTRY();
 
-	TAILQ_FOREACH(c, &conn_list, entries) {
+	TAILQ_FOREACH(c, &srv->client_list, entries) {
 		/* skip sockets which are not ready */
 		if (!FD_ISSET(c->sock_fd, r_fd))
 			continue;
@@ -487,12 +482,13 @@ process_commands(fd_set *r_fd, int *n_ready)
 
 		avail_b = bytes_available(c->sock_fd);
 		if (avail_b > 0 && avail_b < RECV_BUF_SIZE) {
-			int read_count;
+			n = recv_data(c->sock_fd, c->recv_buf, avail_b, 0);
+			if (n > 0)
+				c->recv_buf[n] = '\0';
 
-			read_count = recv_data(c->sock_fd, c->recv_buf, avail_b, 0);
 			/* modify last access */
 			c->c_atime = time(NULL);
-			parse_cmd(c);
+			parse_cmd(srv, c);
 		} else {
 			/* 
 			 * Here we process two sitations: when buffer is
@@ -520,7 +516,7 @@ process_commands(fd_set *r_fd, int *n_ready)
 }
 
 static int
-process_clients_marked_as_destroy(void)
+process_clients_marked_as_destroy(struct ftpd *srv)
 {
 	struct connection *c;
 	struct transport *t;
@@ -529,21 +525,29 @@ process_clients_marked_as_destroy(void)
 	FUNC_ENTRY();
 
 restart:
-	TAILQ_FOREACH(c, &conn_list, entries) {
+	TAILQ_FOREACH(c, &srv->client_list, entries) {
 		t = c->transport;
 
 		if (FLAG_QUERY(c->c_flags, C_KILL)) {
-			destroy_connection(c);
+			destroy_connection(srv, c);
 			processed++;
 			goto restart;
 		} else if (FLAG_QUERY(t->t_flags, T_KILL)) {
-			destroy_transport(c);
+			destroy_transport(srv, c);
 			processed++;
 		}
 	}
 
 	FUNC_EXIT_INT(processed);
 	return processed;
+}
+
+static void
+kill_non_active_clients()
+{
+	
+	
+	
 }
 
 static void
@@ -638,18 +642,20 @@ leave:
 }
 
 static void
-process_transfers(fd_set *r_fd, fd_set *w_fd, int *n_ready)
+process_transfers(struct ftpd *srv, fd_set *r_fd, fd_set *w_fd, int *n_ready)
 {
 	struct connection *c;
 	struct transport *t;
-	int processed = 0;
+	int processed;
 
 	FUNC_ENTRY();
 
-	TAILQ_FOREACH(c, &conn_list, entries) {
+	processed = 0;
+
+	TAILQ_FOREACH(c, &srv->client_list, entries) {
 		t = c->transport;
 
-		/* skip who is FREE, KILL, PORT or PASV */
+		/* skip  FREE, KILL, PORT or PASV */
 		if (FLAG_QUERY(t->t_flags, (T_FREE | T_KILL | T_PORT | T_PASV)))
 			continue;
 
@@ -712,38 +718,46 @@ process_transfers(fd_set *r_fd, fd_set *w_fd, int *n_ready)
 	FUNC_EXIT_VOID();
 }
 
-int main(int argc, char **argv)
+static int
+do_main_loop(struct ftpd *s)
 {
+	int n_ready = 0;
 	fd_set r_fd;
 	fd_set w_fd;
-	int n_ready;
-
-	/* srv is global */
-	srv = init_sftpd(argc, argv);
 
 	while (1) {
 		/* wait for any events, max is 1 min. */
-		n_ready = wait_for_events(srv, &r_fd, &w_fd, 60);
+		n_ready = wait_for_events(s, &r_fd, &w_fd, 60);
 
-		/* check signals */
-		check_received_signals();
+		/* process signals */
+		handle_pending_signals(s);
 
-		/* deal with exist transfers */
-		process_transfers(&r_fd, &w_fd, &n_ready);
+		/* process transfers */
+		process_transfers(s, &r_fd, &w_fd, &n_ready);
 
-		/* process FTP's commands */
-		process_commands(&r_fd, &n_ready);
+		/* process commands */
+		process_commands(s, &r_fd, &n_ready);
+
+		kill_non_active_clients();
 
 		/*
 		 * We allow 10 minutes to users, for to do
 		 * something, after that clients are dropped.
 		 */
-		process_timeouted_sockets(10);
-		process_clients_marked_as_destroy();
+		process_timeouted_sockets(s, 10);
+		process_clients_marked_as_destroy(s);
 
 		/* accept new clients, if they are */
-		accept_connection(srv->srv_socket, &r_fd, &n_ready);
+		accept_connection(s, s->srv_socket, &r_fd, &n_ready);
 	}
 
 	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	struct ftpd *srv;
+
+	srv = sftpd_probe(argc, argv);
+	return do_main_loop(srv);
 }

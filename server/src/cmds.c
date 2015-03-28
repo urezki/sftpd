@@ -27,9 +27,10 @@
 #include <cmds.h>
 #include <hash.h>
 #include <mem.h>
+#include <str.h>
 
 static int
-translate_path(const char *root, const char *cur, char *dst)
+build_full_path(const char *root, const char *cur, char *dst)
 {
 	char absolute_path[PATH_MAX] = {'\0'};
 	char tmp_path[PATH_MAX] = {'\0'};
@@ -47,6 +48,9 @@ translate_path(const char *root, const char *cur, char *dst)
 		/* 1) cd foo/ */
 		n = snprintf(absolute_path, PATH_MAX, "%s%s", cur, dst);
 	}
+
+	if (n)
+		;
 
 	/* /home/urezki/../ftp/.. */
 	if ((dot = strrchr(absolute_path, '.')))
@@ -99,6 +103,9 @@ get_abs_path(const char *root, const char *cur, const char *path, char *abs_path
 		n = snprintf(absolute_path, PATH_MAX, "%s%s", cur, path);
 	}
 
+	if (n)
+		;
+
 	/* /home/urezki/../ftp/.. */
 	if ((dot = strrchr(absolute_path, '.')))
 		if (*(dot - 1) == '.' && *(dot + 1) == '\0')
@@ -129,23 +136,6 @@ get_abs_path(const char *root, const char *cur, const char *path, char *abs_path
 	snprintf(abs_path, PATH_MAX, "%s", absolute_path);
 }
 
-static char *
-get_cmd_arg(struct connection *c, int pos)
-{
-	char *cmd_arg;
-
-	if (pos == 0)
-		cmd_arg = strchr(c->recv_buf, ' '); /* first */
-	else
-		cmd_arg = strrchr(c->recv_buf, ' '); /* last */
-
-	/* checks whether we have any args. */
-	if (cmd_arg == NULL || *(cmd_arg + 1) == '\0')
-		return NULL;
-
-	return cmd_arg + 1;
-}
-
 static int
 is_path_ok(struct connection *conn)
 {
@@ -153,11 +143,12 @@ is_path_ok(struct connection *conn)
 	struct stat st;
 	int ret;
 
-	cmd_arg = get_cmd_arg(conn, 1);
+	cmd_arg = strchr(conn->recv_buf, ' ');
 	if (cmd_arg == NULL)
 		goto fail;
 
-	ret = translate_path(conn->root_dir, conn->curr_dir, cmd_arg);
+	cmd_arg += 1;
+	ret = build_full_path(conn->root_dir, conn->curr_dir, cmd_arg);
 	if (ret < 0)
 		goto fail;
 
@@ -210,7 +201,7 @@ check_abs_path(const char *root_dir, char *abs_path)
 }
 
 static void
-cmd_feat(struct connection *conn)
+cmd_feat(void *srv, struct connection *conn)
 {
 	const char *const feat = 
 		"211-Features:\r\n"
@@ -230,13 +221,15 @@ cmd_feat(struct connection *conn)
  * recv_buf_len is 14, in this case.
  */
 static void
-cmd_user(struct connection *conn)
+cmd_user(void *srv, struct connection *conn)
 {
 	char tmp_buf[120] = {'\0'};
 	int rejected = 0;
-	
+
 	FUNC_ENTRY();
-	
+
+	FLAG_CLEAR(conn->c_flags, C_AUTH);
+
 	if (strstr(conn->recv_buf, "anonymous") ||
 	    strstr(conn->recv_buf, "ftp"))
 	{
@@ -245,8 +238,8 @@ cmd_user(struct connection *conn)
 						"as your password");
 		(void) strncpy(conn->user_name, "ftp", sizeof(conn->user_name));
 	} else {
-		char *user_name;
-		
+		char *user_name = NULL;
+
 		/* skipping "USER " */
 		user_name = strchr(conn->recv_buf, ' ');
 		if (user_name != NULL && conn->recv_buf_len > 4) {
@@ -260,33 +253,25 @@ cmd_user(struct connection *conn)
 			rejected = 1;	  /* mark as was rejected */
 		}
 	}
-	
+
 	send_cmd(conn->sock_fd, !rejected ? 331:530, "%s", tmp_buf);
 	FUNC_EXIT_VOID();
 }
 
 static void
-cmd_pass(struct connection *conn)
+cmd_pass(void *srv, struct connection *conn)
 {
 	struct spwd *p_shadow;
 	struct passwd *p;
 
 	FUNC_ENTRY();
 
+	if (FLAG_QUERY(conn->c_flags, C_AUTH))
+		return;
+
 	p = getpwnam(conn->user_name);
 	if (p != NULL) {
 		char *user_pass;
-
-		conn->uid = p->pw_uid;
-		conn->gid = p->pw_gid;
-
-		(void) strncpy(conn->root_dir, p->pw_dir, sizeof(conn->root_dir));
-		if (conn->root_dir[strlen(conn->root_dir) - 1] != '/')
-			(void) strcat(conn->root_dir, "/");
-
-		(void) strncpy(conn->curr_dir, p->pw_dir, sizeof(conn->curr_dir));
-		if (conn->curr_dir[strlen(conn->curr_dir) - 1] != '/')
-			(void) strcat(conn->curr_dir, "/");
 
 		user_pass = strchr(conn->recv_buf, ' ');
 
@@ -295,7 +280,7 @@ cmd_pass(struct connection *conn)
 			FLAG_SET(conn->c_flags, C_AUTH);
 		} else if (user_pass != NULL && conn->recv_buf_len > 4) {
 			char *p_crypt;
-			
+
 			p_crypt = crypt(user_pass + 1, p->pw_passwd);
 			if (p_crypt != NULL) {
 				if (!strcmp(p_crypt, p->pw_passwd)) {
@@ -314,9 +299,24 @@ cmd_pass(struct connection *conn)
 	}
 
 	if (FLAG_QUERY(conn->c_flags, C_AUTH)) {
+		conn->uid = p->pw_uid;
+		conn->gid = p->pw_gid;
+
+		(void) strncpy(conn->root_dir, p->pw_dir,
+				sizeof(conn->root_dir));
+
+		if (conn->root_dir[strlen(conn->root_dir) - 1] != '/')
+			(void) strcat(conn->root_dir, "/");
+
+		(void) strncpy(conn->curr_dir, p->pw_dir,
+				sizeof(conn->curr_dir));
+
+		if (conn->curr_dir[strlen(conn->curr_dir) - 1] != '/')
+			(void) strcat(conn->curr_dir, "/");
+
 		send_cmd(conn->sock_fd, 230, "%s %s", conn->user_name, "logged in");
-		PRINT_DEBUG("%s user logged in\n", conn->user_name);
 		chdir(conn->root_dir);
+		PRINT_DEBUG("%s user logged in\n", conn->user_name);
 	} else {
 		send_cmd(conn->sock_fd, 530, "Login incorrect");
 		PRINT_DEBUG("%s Login incorrect\n", conn->user_name);
@@ -333,7 +333,7 @@ cmd_pass(struct connection *conn)
  * for instance: PORT 192,168,5,12,4,1
  */
 static void
-cmd_port(struct connection *conn)
+cmd_port(void *srv, struct connection *conn)
 {
 	char *ip_address = NULL;
 	int data_port = 0;
@@ -406,7 +406,7 @@ end:
 }
 
 static void
-cmd_pasv(struct connection *conn)
+cmd_pasv(void *srv, struct connection *conn)
 {
 	struct sockaddr_in addr;
 	int listen_sock;
@@ -453,7 +453,7 @@ cmd_pasv(struct connection *conn)
 				 (htons(addr.sin_port) & 0x00ff));
 
 		t->listen_socket = listen_sock;
-		FD_SET(t->listen_socket, &srv->read_ready);
+		FD_SET(t->listen_socket, &((ftpd *)srv)->read_ready);
 		FLAG_SET(t->t_flags, T_ACPT);
 		goto end;
 	} else {
@@ -469,7 +469,7 @@ end:
 }
 
 static void
-cmd_retr(struct connection *conn)
+cmd_retr(void *srv, struct connection *conn)
 {
 	transport *t;
 	char *l_file;
@@ -488,11 +488,12 @@ cmd_retr(struct connection *conn)
 		if (t->local_fd != -1) {
 			fstat(t->local_fd, &t->st);
 			
-			FD_SET(t->socket, &srv->write_ready);
+			FD_SET(t->socket, &((ftpd *)srv)->write_ready);
 			send_cmd(conn->sock_fd, 150, "Binary mode.");
 			FLAG_SET(t->t_flags, T_RETR);
 		} else {
 			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+			fprintf(stdout, "--> error: %s -- %s.\n", l_file + 1, conn->recv_buf);
 		}
 	} else {
 		errno = ENOENT;
@@ -507,7 +508,7 @@ leave:
 }
 
 static void
-cmd_allo(struct connection *conn)
+cmd_allo(void *srv, struct connection *conn)
 {
 	FUNC_ENTRY();
 	
@@ -522,7 +523,7 @@ cmd_allo(struct connection *conn)
  * @conn: 
  */
 static void
-cmd_rmd(struct connection *conn)
+cmd_rmd(void *srv, struct connection *conn)
 {
 	char *dir_name;
 	int ret;
@@ -549,7 +550,7 @@ cmd_rmd(struct connection *conn)
  * @conn: data struct that describes one connection.
  */
 static void
-cmd_mkd(struct connection *conn)
+cmd_mkd(void *srv, struct connection *conn)
 {
 	char *dir_name;
 	int ret;
@@ -571,7 +572,7 @@ cmd_mkd(struct connection *conn)
 }
 
 static void
-cmd_stor(struct connection *conn)
+cmd_stor(void *srv, struct connection *conn)
 {
 	transport *t;
 	
@@ -584,7 +585,7 @@ cmd_stor(struct connection *conn)
 
 			t->local_fd = open(l_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 			if (t->local_fd != -1) {
-				FD_SET(t->socket, &srv->read_ready);
+				FD_SET(t->socket, &((ftpd *) srv)->read_ready);
 				send_cmd(conn->sock_fd, 150, "Binary mode.");
 				FLAG_SET(t->t_flags, T_STOR);
 			} else {
@@ -600,7 +601,7 @@ cmd_stor(struct connection *conn)
 }
 
 static void
-cmd_size(struct connection *conn)
+cmd_size(void *srv, struct connection *conn)
 {
 	transport *tr;
 	char *l_file;
@@ -632,7 +633,7 @@ cmd_size(struct connection *conn)
  * the user's current working or default directory.
  */
 static void
-cmd_list(struct connection *c)
+cmd_list(void *srv, struct connection *c)
 {
 	char path[PATH_MAX] = {'\0'};
 	transport *t;
@@ -675,7 +676,7 @@ cmd_list(struct connection *c)
 
 start_ascii_mode:
 	send_cmd(c->sock_fd, 150, "ASCII MODE");
-	FD_SET(t->socket, &srv->write_ready);
+	FD_SET(t->socket, &((ftpd *) srv)->write_ready);
 	FLAG_SET(t->t_flags, T_LIST);
 	return;
 
@@ -692,16 +693,16 @@ stat_call_error:
 }
 
 static void
-cmd_nlst(struct connection *c)
+cmd_nlst(void *srv, struct connection *c)
 {
 	transport *t = c->transport;
 
 	FLAG_SET(t->l_opt.l_flags, L_NLST);
-	return cmd_list(c);
+	return cmd_list(srv, c);
 }
 
 static void
-cmd_dele(struct connection *conn)
+cmd_dele(void *srv, struct connection *conn)
 {
 	char *l_file;
 	int ret;
@@ -724,7 +725,7 @@ cmd_dele(struct connection *conn)
 }
 
 static void
-cmd_noop(struct connection *conn)
+cmd_noop(void *srv, struct connection *conn)
 {
 	FUNC_ENTRY();
 	
@@ -734,7 +735,7 @@ cmd_noop(struct connection *conn)
 }
 
 static void
-cmd_syst(struct connection *conn)
+cmd_syst(void *srv, struct connection *conn)
 {
 	FUNC_ENTRY();
 
@@ -744,7 +745,7 @@ cmd_syst(struct connection *conn)
 }
 
 static void
-cmd_type(struct connection *conn)
+cmd_type(void *srv, struct connection *conn)
 {
 	FUNC_ENTRY();
 	
@@ -754,7 +755,7 @@ cmd_type(struct connection *conn)
 }
 
 static void
-cmd_abor(struct connection *conn)
+cmd_abor(void *srv, struct connection *conn)
 {
 	transport *t;
 	
@@ -773,7 +774,7 @@ cmd_abor(struct connection *conn)
 }
 
 static void
-cmd_help(struct connection *conn)
+cmd_help(void *srv, struct connection *conn)
 {
 	FUNC_ENTRY();
 	
@@ -783,7 +784,7 @@ cmd_help(struct connection *conn)
 }
 
 static void
-cmd_stru(struct connection *conn)
+cmd_stru(void *srv, struct connection *conn)
 {
 	FUNC_ENTRY();
 	
@@ -793,7 +794,7 @@ cmd_stru(struct connection *conn)
 }
 
 static void
-cmd_quit(struct connection *conn)
+cmd_quit(void *srv, struct connection *conn)
 {
 	FUNC_ENTRY();
 	
@@ -808,7 +809,7 @@ cmd_quit(struct connection *conn)
  * of the user.
  */
 static void
-cmd_pwd(struct connection *conn)
+cmd_pwd(void *srv, struct connection *conn)
 {
 	int root_len;
 	
@@ -822,7 +823,7 @@ cmd_pwd(struct connection *conn)
 }
 
 static void
-cmd_cdup(struct connection *conn)
+cmd_cdup(void *srv, struct connection *conn)
 {
 	char path[PATH_MAX];
 	int retval;
@@ -864,7 +865,7 @@ cmd_cdup(struct connection *conn)
  * of the user.
  */
 static void
-cmd_cwd(struct connection *conn)
+cmd_cwd(void *srv, struct connection *conn)
 {
 	char path[PATH_MAX];
 	int root_len;
@@ -906,29 +907,34 @@ exit:
 }
 
 void
-parse_cmd(connection *conn)
+parse_cmd(void *srv, connection *conn)
 {
 	const struct cmd_handler *h;
 	struct hash_entry *entry;
-	char key[256] = {'\0'};
+	char key[MAX_CMD_LEN] = {'\0'};
 	int i = 0;
 
 	FUNC_ENTRY();
 
-	/* 
-	 * remove '\r' and '\n' from the recv_buf.
+	/*
+	 * remove '\r' or '\n' from the recv_buf
 	 */
-	i = strcspn(conn->recv_buf, "\r\n");
+	i = str_strcspn(conn->recv_buf, "\r\n");
 	conn->recv_buf[i] = '\0';
 	conn->recv_buf_len = i;
 
 	/* get key, i.e. command name */
 	for (i = 0; conn->recv_buf[i] != ' ' && conn->recv_buf[i] != '\0'; i++) {
-		if (i < sizeof(key))
+		if (i < (sizeof(key) - 1))
 			key[i] = conn->recv_buf[i];
 	}
 
-	entry = hash_lookup(srv->cmd_hash_table, key);
+	/*
+	 * convert to apper case
+	 */
+	str_contac(key);
+
+	entry = hash_lookup(((ftpd *) srv)->cmd_table, key);
 	if (entry) {
 		h = (const struct cmd_handler *) entry->data;
 		if (FLAG_QUERY(conn->c_flags, C_AUTH) || !h->need_auth) {
@@ -948,7 +954,7 @@ parse_cmd(connection *conn)
 				set_euid(conn->gid);
 			}
 
-			h->cmd_handler(conn);
+			h->cmd_handler(srv, conn);
 		} else {
 			send_cmd(conn->sock_fd, 503, "You must login, at first.");
 		}

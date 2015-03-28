@@ -116,7 +116,8 @@ __free(void *ptr, const char *file, const char *func, int line)
 	}
 
 	if (!found) {
-		PRINT_DEBUG("unallocated free of %p by %s in %s at line %d\n", ptr, func, file, line);
+		PRINT_DEBUG("unallocated free of %p by %s in %s at line %d\n",
+					ptr, func, file, line);
 		BUG();
 	}
 }

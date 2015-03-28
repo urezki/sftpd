@@ -58,7 +58,7 @@ send_data(int s, const void *buf, int len, int flags)
  * @s:     socket;
  * @buf:   buffer where the message will be stored;
  * @len:   length of the message;
- * @flags: flags which we passing to recv.
+ * @flags: flags passing to recv.
  */
 int
 recv_data(int s, void *buf, int len, int flags)
@@ -112,6 +112,8 @@ send_cmd(int s, const int cmd, const char *const format, ...)
 	va_end(args);
 	
 	err = send_data(s, buf, i, 0);
+	if (err < 0)
+		;
 	
 	FUNC_EXIT_VOID();
 }
@@ -340,15 +342,14 @@ check_socket(int s)
 void
 close_socket(int s)
 {
-	int ret;
-	
 	FUNC_ENTRY();
-	
-	ret = shutdown(s, SHUT_RDWR);
-	if (ret)
-		PRINT_DEBUG("shutdown failed with errno %d: %s\n",
-				  errno, strerror(errno));
-	close(s);
+
+	/*
+	 * we don't care about return values, cause
+	 * it doesn't make sense on this step, at all.
+	 */
+	(void) shutdown(s, SHUT_RDWR);
+	(void) close(s);
 
 	FUNC_EXIT_VOID();
 }
@@ -395,7 +396,7 @@ activate_reuseaddr(int s)
 	FUNC_ENTRY();
 	
 	ret = setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on,
-				  sizeof(on));
+					 sizeof(on));
 	if (ret != 0)
 		PRINT_DEBUG("setsockopt failed with errno %d: %s\n",
 				  errno, strerror(errno));

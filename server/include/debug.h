@@ -1,11 +1,13 @@
 #ifndef __DEBUG_H__
 #define __DEBUG_H__
 
+#include <errno.h>
+
 /* just causes a Segmentation Fault */
 #define BUG() (*(int *)0 = 0)
 
-//#define __DEBUG_MSG__
-//#define __DEBUG_FUNC__
+#define __DEBUG_MSG__
+/* #define __DEBUG_FUNC__ */
 
 #ifdef __DEBUG_MSG__		  /* DEBUG MSG */
 #define PRINT_DEBUG(fmt,arg...) do {								\
@@ -15,6 +17,12 @@
 #define PRINT_DEBUG(fmt,arg...)					\
 	do { } while(0)
 #endif  /* __DEBUG_MSG__ */
+
+#define handle_error_en(en, msg) \
+	do { errno = en; perror(msg); exit(EXIT_FAILURE); } while (0)
+
+#define handle_error(msg) \
+	do { perror(msg); exit(EXIT_FAILURE); } while (0)
 
 #define FATAL_ERROR(fmt, arg...) do {								\
 		fprintf(stdout, "%s:%d: " fmt, __FILE__, __LINE__, ##arg);	\
