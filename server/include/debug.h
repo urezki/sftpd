@@ -3,8 +3,11 @@
 
 #include <errno.h>
 
+#define unlikely(x) __builtin_expect(!!(x), 0)
+
 /* just causes a Segmentation Fault */
 #define BUG() (*(int *)0 = 0)
+#define BUG_ON(condition) do { if (unlikely(condition)) BUG(); } while (0)
 
 #define __DEBUG_MSG__
 /* #define __DEBUG_FUNC__ */

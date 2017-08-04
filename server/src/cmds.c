@@ -30,156 +30,84 @@
 #include <str.h>
 
 static int
-build_full_path(const char *root, const char *cur, char *dst)
+convert_to_absolute_path(const char *root, const char *cur,
+			const char *cmd_arg, char *out)
 {
-	char absolute_path[PATH_MAX] = {'\0'};
 	char tmp_path[PATH_MAX] = {'\0'};
 	char *dot;
 	int n;
 
-	if (root == NULL || cur == NULL || dst == NULL)
+	if (root == NULL || cur == NULL)
 		return -1;
 
-	if (*dst == '/' || *dst == '~') {
-		/* 1) cd / 2) cd ~/ 3) cd ~ */
-		n = snprintf(absolute_path, PATH_MAX, "%s%s", root,
-					 *(dst + 1) == '/' ? dst + 2 : dst + 1);
+	if (cmd_arg) {
+		if (*cmd_arg == '/' || *cmd_arg == '~') {
+			/* 1) cd / 2) cd ~/ 3) cd ~ */
+			n = snprintf(out, PATH_MAX, "%s%s", root,
+					*(cmd_arg + 1) == '/' ? cmd_arg + 2 : cmd_arg + 1);
+		} else {
+			/* 2) cd foo/ */
+			n = snprintf(out, PATH_MAX, "%s%s", cur, cmd_arg);
+		}
 	} else {
-		/* 1) cd foo/ */
-		n = snprintf(absolute_path, PATH_MAX, "%s%s", cur, dst);
+		n = snprintf(out, PATH_MAX, "%s", cur);
 	}
 
 	if (n)
 		;
 
 	/* /home/urezki/../ftp/.. */
-	if ((dot = strrchr(absolute_path, '.')))
+	if ((dot = strrchr(out, '.')))
 		if (*(dot - 1) == '.' && *(dot + 1) == '\0')
-			strcat(absolute_path, "/");
+			strcat(out, "/");
 
 	/*
 	 * Here we can have following combinations:
 	 * 1) /home/urezki/../ftp/../
 	 * 2) /home/urezki/
 	 */
-	while ((dot = strstr(absolute_path, "/../"))) {
+	while ((dot = strstr(out, "/../"))) {
 		char *s_pp = NULL;
 
-		if (dot == absolute_path)
+		if (dot == out)
 			s_pp = dot;
 		else
 			s_pp = (dot - 1);
 
-		while (s_pp != absolute_path && *s_pp != '/')
+		while (s_pp != out && *s_pp != '/')
 			s_pp--;
 
 		*(s_pp + 1) = '\0';
 
-		snprintf(tmp_path, PATH_MAX, "%s%s", absolute_path, dot + 4);
-		snprintf(absolute_path, PATH_MAX, "%s", tmp_path);
+		snprintf(tmp_path, PATH_MAX, "%s%s", out, dot + 4);
+		snprintf(out, PATH_MAX, "%s", tmp_path);
 	}
 
-	snprintf(dst, PATH_MAX, "%s", absolute_path);
 	return 0;
 }
 
-static void
-get_abs_path(const char *root, const char *cur, const char *path, char *abs_path)
-{
-	char absolute_path[PATH_MAX] = {'\0'};
-	char tmp_path[PATH_MAX] = {'\0'};
-	char *dot;
-	int n;
-
-	if (root == NULL || cur == NULL || path == NULL || abs_path == NULL)
-		return;
-
-	if (*path == '/' || *path == '~') {
-		/* 1) cd / 2) cd ~/ 3) cd ~ */
-		n = snprintf(absolute_path, PATH_MAX, "%s%s", root,
-					 *(path + 1) == '/' ? path + 2 : path + 1);
-	} else {
-		/* 1) cd foo/ */
-		n = snprintf(absolute_path, PATH_MAX, "%s%s", cur, path);
-	}
-
-	if (n)
-		;
-
-	/* /home/urezki/../ftp/.. */
-	if ((dot = strrchr(absolute_path, '.')))
-		if (*(dot - 1) == '.' && *(dot + 1) == '\0')
-			strcat(absolute_path, "/");
-
-	/*
-	 * Here we can have following combinations:
-	 * 1) /home/urezki/../ftp/../
-	 * 2) /home/urezki/
-	 */
-	while ((dot = strstr(absolute_path, "/../"))) {
-		char *s_pp = NULL;
-
-		if (dot == absolute_path)
-			s_pp = dot;
-		else
-			s_pp = (dot - 1);
-
-		while (s_pp != absolute_path && *s_pp != '/')
-			s_pp--;
-
-		*(s_pp + 1) = '\0';
-
-		snprintf(tmp_path, PATH_MAX, "%s%s", absolute_path, dot + 4);
-		snprintf(absolute_path, PATH_MAX, "%s", tmp_path);
-	}
-
-	snprintf(abs_path, PATH_MAX, "%s", absolute_path);
-}
-
 static int
-is_path_ok(struct connection *conn)
+convert_path_to_abs_and_check(struct connection *conn)
 {
+	char abs_path[PATH_MAX] = {'\0'};
 	char *cmd_arg;
 	struct stat st;
 	int ret;
 
 	cmd_arg = strchr(conn->recv_buf, ' ');
-	if (cmd_arg == NULL)
-		goto fail;
+	if (cmd_arg)
+		cmd_arg += 1;
 
-	cmd_arg += 1;
-	ret = build_full_path(conn->root_dir, conn->curr_dir, cmd_arg);
+	/*
+	 * We may pass NULL as cmd_path argument. In that case
+	 * current directory of the user should be reported.
+	 */
+	ret = convert_to_absolute_path(conn->root_dir,
+					conn->curr_dir, cmd_arg, abs_path);
 	if (ret < 0)
 		goto fail;
 
 	/* check symbolic links */
-	if (stat(cmd_arg, &st) != -1) {
-		if (!S_ISLNK(st.st_mode)) {
-			char buf[1024] = {'\0'};
-			int len;
-
-			len = readlink(cmd_arg, buf, sizeof(buf) - 1);
-			if (len != -1) {
-				buf[len] = '\0';
-				*cmd_arg = '\0';
-				strcat(cmd_arg, buf);
-			}
-		}
-	}
-
-	if (!strncmp(cmd_arg, conn->root_dir, strlen(conn->root_dir)))
-		return 1;
-
-fail:
-	return 0;
-}
-
-static int
-check_abs_path(const char *root_dir, char *abs_path)
-{
-	struct stat st;
-
-	/* check for symbolic links */
 	if (stat(abs_path, &st) != -1) {
 		if (!S_ISLNK(st.st_mode)) {
 			char buf[1024] = {'\0'};
@@ -194,9 +122,22 @@ check_abs_path(const char *root_dir, char *abs_path)
 		}
 	}
 
-	if (!strncmp(abs_path, root_dir, strlen(root_dir)))
-		return 1;
+	if (!strncmp(abs_path, conn->root_dir, strlen(conn->root_dir))) {
+		char cmd[MAX_CMD_LEN] = {'\0'};
+		int i = 0;
 
+		/* get command name */
+		for (i = 0; conn->recv_buf[i] != ' ' && conn->recv_buf[i] != '\0'; i++) {
+			if (i < (sizeof(cmd) - 1))
+				cmd[i] = conn->recv_buf[i];
+		}
+
+		snprintf(conn->recv_buf, PATH_MAX - i, "%s %s", cmd, abs_path);
+
+		return 1;
+	}
+
+fail:
 	return 0;
 }
 
@@ -238,7 +179,7 @@ cmd_user(void *srv, struct connection *conn)
 						"as your password");
 		(void) strncpy(conn->user_name, "ftp", sizeof(conn->user_name));
 	} else {
-		char *user_name = NULL;
+		char *user_name;
 
 		/* skipping "USER " */
 		user_name = strchr(conn->recv_buf, ' ');
@@ -282,18 +223,18 @@ cmd_pass(void *srv, struct connection *conn)
 			char *p_crypt;
 
 			p_crypt = crypt(user_pass + 1, p->pw_passwd);
-			if (p_crypt != NULL) {
-				if (!strcmp(p_crypt, p->pw_passwd)) {
+			if (p_crypt) {
+				if (!strcmp(p_crypt, p->pw_passwd))
 					FLAG_SET(conn->c_flags, C_AUTH);
-				} else {
-					/* checking shadow pass */
-					p_shadow = getspnam(conn->user_name);
-					if (p_shadow != NULL)
-						p_crypt = crypt(user_pass + 1, p_shadow->sp_pwdp);
-					if (p_crypt != NULL)
-						if (!strcmp(p_crypt, p_shadow->sp_pwdp))
-							FLAG_SET(conn->c_flags, C_AUTH);
-				}
+			} else {
+				/* checking shadow pass */
+				p_shadow = getspnam(conn->user_name);
+				if (p_shadow)
+					p_crypt = crypt(user_pass + 1, p_shadow->sp_pwdp);
+
+				if (p_crypt)
+					if (!strcmp(p_crypt, p_shadow->sp_pwdp))
+						FLAG_SET(conn->c_flags, C_AUTH);
 			}
 		}
 	}
@@ -482,7 +423,7 @@ cmd_retr(void *srv, struct connection *conn)
 		goto leave;
 	}
 		
-	if (is_path_ok(conn)) {
+	if (convert_path_to_abs_and_check(conn)) {
 		l_file = strchr(conn->recv_buf, ' ');
 		t->local_fd = open(l_file + 1, O_RDONLY);
 		if (t->local_fd != -1) {
@@ -493,11 +434,9 @@ cmd_retr(void *srv, struct connection *conn)
 			FLAG_SET(t->t_flags, T_RETR);
 		} else {
 			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
-			fprintf(stdout, "--> error: %s -- %s.\n", l_file + 1, conn->recv_buf);
 		}
 	} else {
-		errno = ENOENT;
-		send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+		send_cmd(conn->sock_fd, 550, "%s", strerror(ENOENT));
 	}
 
 	if (!FLAG_QUERY(t->t_flags, T_RETR))
@@ -517,6 +456,59 @@ cmd_allo(void *srv, struct connection *conn)
 	FUNC_EXIT_VOID();
 }
 
+#ifdef UPLOAD_SUPPORT
+static void
+cmd_stor(void *srv, struct connection *conn)
+{
+	transport *t;
+
+	FUNC_ENTRY();
+
+	t = conn->transport;
+	if (FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) {
+		if (convert_path_to_abs_and_check(conn)) {
+			char *l_file = strchr(conn->recv_buf, ' ') + 1;
+
+			t->local_fd = open(l_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+			if (t->local_fd != -1) {
+				FD_SET(t->socket, &((ftpd *) srv)->read_ready);
+				send_cmd(conn->sock_fd, 150, "Binary mode.");
+				FLAG_SET(t->t_flags, T_STOR);
+			} else {
+				send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+				FLAG_APPEND(t->t_flags, T_KILL);
+			}
+		}
+	} else {
+		send_cmd(conn->sock_fd, 425, "You must use PASV or PORT before.");
+	}
+
+	FUNC_EXIT_VOID();
+}
+
+static void
+cmd_dele(void *srv, struct connection *conn)
+{
+	char *l_file;
+	int ret;
+
+	FUNC_ENTRY();
+
+	if (convert_path_to_abs_and_check(conn)) {
+		l_file = strchr(conn->recv_buf, ' ') + 1;
+		ret = unlink(l_file);
+		if (ret != -1)
+			send_cmd(conn->sock_fd, 250, "File deleted OK.");
+		else
+			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+	} else {
+		errno = ENOENT;
+		send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+	}
+
+	FUNC_EXIT_VOID();
+}
+
 /**
  * cmd_rmd - remove directory
  * 
@@ -530,7 +522,7 @@ cmd_rmd(void *srv, struct connection *conn)
 
 	FUNC_ENTRY();
 
-	if (is_path_ok(conn)) {
+	if (convert_path_to_abs_and_check(conn)) {
 		dir_name = strchr(conn->recv_buf, ' ') + 1;	
 		ret = remove_folder(dir_name);
 		if (ret == 0)
@@ -557,7 +549,7 @@ cmd_mkd(void *srv, struct connection *conn)
 	
 	FUNC_ENTRY();
 	
-	if (is_path_ok(conn)) {
+	if (convert_path_to_abs_and_check(conn)) {
 		dir_name = strchr(conn->recv_buf, ' ');	
 		ret = mkdir(dir_name + 1, 0755);
 		if (ret != -1)
@@ -570,35 +562,7 @@ cmd_mkd(void *srv, struct connection *conn)
 
 	FUNC_EXIT_VOID();
 }
-
-static void
-cmd_stor(void *srv, struct connection *conn)
-{
-	transport *t;
-	
-	FUNC_ENTRY();
-	
-	t = conn->transport;
-	if (FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) {
-		if (is_path_ok(conn)) {
-			char *l_file = strchr(conn->recv_buf, ' ') + 1;
-
-			t->local_fd = open(l_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-			if (t->local_fd != -1) {
-				FD_SET(t->socket, &((ftpd *) srv)->read_ready);
-				send_cmd(conn->sock_fd, 150, "Binary mode.");
-				FLAG_SET(t->t_flags, T_STOR);
-			} else {
-				send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
-				FLAG_APPEND(t->t_flags, T_KILL);
-			}
-		}
-	} else {
-		send_cmd(conn->sock_fd, 425, "You must use PASV or PORT before.");
-	}
-	
-	FUNC_EXIT_VOID();
-}
+#endif	/* UPLOAD_SUPPORT */
 
 static void
 cmd_size(void *srv, struct connection *conn)
@@ -610,7 +574,7 @@ cmd_size(void *srv, struct connection *conn)
 	FUNC_ENTRY();
 	
 	tr = conn->transport;
-	if (is_path_ok(conn)) {
+	if (convert_path_to_abs_and_check(conn)) {
 		l_file = strchr(conn->recv_buf, ' ');
 		ret = lstat(l_file + 1, &tr->st);
 		if (ret != -1)
@@ -635,9 +599,8 @@ cmd_size(void *srv, struct connection *conn)
 static void
 cmd_list(void *srv, struct connection *c)
 {
-	char path[PATH_MAX] = {'\0'};
+	char *path;
 	transport *t;
-	char *arg;
 	int ret;
 
 	t = c->transport;
@@ -645,24 +608,16 @@ cmd_list(void *srv, struct connection *c)
 	if (!FLAG_QUERY(t->t_flags, (T_PORT | T_PASV)))
 		goto use_port_or_pasv;
 
-	arg = strrchr(c->recv_buf, ' ');
-	if (arg == NULL || *(arg + 1) == '-') {
-		ret = snprintf(t->l_opt.path, sizeof(t->l_opt.path) - 1, "%s", c->curr_dir);
-		if (ret > 0)
-			t->l_opt.path[ret] = '\0';
+	if (!convert_path_to_abs_and_check(c))
+		goto no_such_file_or_dir;
 
-		FLAG_APPEND(t->l_opt.l_flags, L_FOLD);
-		goto start_ascii_mode;
-	}
-
-	get_abs_path(c->root_dir, c->curr_dir, arg + 1, path);
-	ret = check_abs_path(c->root_dir, path);
-	if (ret == 0)
-		goto outside_chroot;
+	path = strchr(c->recv_buf, ' ');
+	BUG_ON(!path);
+	path += 1;
 
 	ret = stat(path, &t->l_opt.st);
 	if (ret != 0)
-		goto stat_call_error;
+		goto no_such_file_or_dir;
 
 	ret = snprintf(t->l_opt.path, sizeof(t->l_opt.path) - 1, "%s", path);
 	if (ret > 0)
@@ -674,7 +629,6 @@ cmd_list(void *srv, struct connection *c)
 		FLAG_APPEND(t->l_opt.l_flags, L_FILE);
 	}
 
-start_ascii_mode:
 	send_cmd(c->sock_fd, 150, "ASCII MODE");
 	FD_SET(t->socket, &((ftpd *) srv)->write_ready);
 	FLAG_SET(t->t_flags, T_LIST);
@@ -684,10 +638,8 @@ use_port_or_pasv:
 	send_cmd(c->sock_fd, 550, "sorry, use PORT or PASV first");
 	return;
 
-outside_chroot:
-	errno = ENOENT;
-stat_call_error:
-	send_cmd(c->sock_fd, 550, "%s", strerror(errno));
+no_such_file_or_dir:
+	send_cmd(c->sock_fd, 550, "%s", strerror(ENOENT));
 	FLAG_APPEND(t->t_flags, T_KILL);
 	return;
 }
@@ -699,29 +651,6 @@ cmd_nlst(void *srv, struct connection *c)
 
 	FLAG_SET(t->l_opt.l_flags, L_NLST);
 	return cmd_list(srv, c);
-}
-
-static void
-cmd_dele(void *srv, struct connection *conn)
-{
-	char *l_file;
-	int ret;
-	
-	FUNC_ENTRY();
-	
-	if (is_path_ok(conn)) {
-		l_file = strchr(conn->recv_buf, ' ') + 1;
-		ret = unlink(l_file);
-		if (ret != -1)
-			send_cmd(conn->sock_fd, 250, "File deleted OK.");
-		else
-			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
-	} else {
-		errno = ENOENT;
-		send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
-	}
-	
-	FUNC_EXIT_VOID();
 }
 
 static void
@@ -860,6 +789,14 @@ cmd_cdup(void *srv, struct connection *conn)
 	FUNC_EXIT_VOID();
 }
 
+/* static void */
+/* cmd_mdtm(void *srv, struct connection *conn) */
+/* { */
+/* 	FUNC_ENTRY(); */
+
+/* 	FUNC_EXIT_VOID(); */
+/* } */
+
 /**
  * cmd_cwd - changing the current working dirrectory
  * of the user.
@@ -873,7 +810,7 @@ cmd_cwd(void *srv, struct connection *conn)
 	
 	FUNC_ENTRY();
 
-	if (is_path_ok(conn)) {
+	if (convert_path_to_abs_and_check(conn)) {
 		ret = chdir(strchr(conn->recv_buf, ' ') + 1);
 		if (ret == -1) {
 			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
@@ -968,31 +905,32 @@ parse_cmd(void *srv, connection *conn)
 
 const struct cmd_handler cmd_table[] =
 {
-	{ "USER", 1, cmd_user, 1, 0, 4 },
-	{ "PASS", 1, cmd_pass, 1, 0, 4 },
-	{ "PORT", 1, cmd_port, 1, 1, 4 },
-	{ "PASV", 0, cmd_pasv, 0, 1, 4 },
-	{ "LIST", 1, cmd_list, 1, 1, 4 },
-	{ "NLST", 1, cmd_nlst, 1, 1, 4 },
-	{ "CDUP", 0, cmd_cdup, 0, 1, 4 },
-	{ "RETR", 1, cmd_retr, 0, 1, 4 },
-	{ "SIZE", 1, cmd_size, 0, 1, 4 },
-	{ "NOOP", 0, cmd_noop, 0, 1, 4 },
-	{ "SYST", 0, cmd_syst, 0, 0, 4 },
-	{ "TYPE", 0, cmd_type, 0, 1, 4 },
-	{ "ABOR", 0, cmd_abor, 0, 1, 4 },
-	{ "STRU", 0, cmd_stru, 0, 1, 4 },
-	{ "QUIT", 0, cmd_quit, 0, 0, 4 },
-	{ "FEAT", 0, cmd_feat, 0, 0, 4 },
-	{ "HELP", 0, cmd_help, 0, 1, 4 },
+	{ "USER", 1, cmd_user, 1, 0, 4, 0 },
+	{ "PASS", 1, cmd_pass, 1, 0, 4, 0 },
+	{ "PORT", 1, cmd_port, 1, 1, 4, 0 },
+	{ "PASV", 0, cmd_pasv, 0, 1, 4, 0 },
+	{ "LIST", 1, cmd_list, 1, 1, 4, 1 },
+	{ "NLST", 1, cmd_nlst, 1, 1, 4, 1 },
+	{ "CDUP", 0, cmd_cdup, 0, 1, 4, 0 },
+	/* { "MDTM", 1, cmd_mdtm, 0, 1, 4, 1 }, */
+	{ "RETR", 1, cmd_retr, 0, 1, 4, 1 },
+	{ "SIZE", 1, cmd_size, 0, 1, 4, 1 },
+	{ "NOOP", 0, cmd_noop, 0, 1, 4, 0 },
+	{ "SYST", 0, cmd_syst, 0, 0, 4, 1 },
+	{ "TYPE", 0, cmd_type, 0, 1, 4, 0 },
+	{ "ABOR", 0, cmd_abor, 0, 1, 4, 0 },
+	{ "STRU", 0, cmd_stru, 0, 1, 4, 1 },
+	{ "QUIT", 0, cmd_quit, 0, 0, 4, 0 },
+	{ "FEAT", 0, cmd_feat, 0, 0, 4, 0 },
+	{ "HELP", 0, cmd_help, 0, 1, 4, 0 },
 #ifdef UPLOAD_SUPPORT
-	{ "STOR", 0, cmd_stor, 0, 1, 4 },
-	{ "DELE", 1, cmd_dele, 0, 1, 4 },
-	{ "RMD",  1, cmd_rmd, 0, 1, 3  },
-	{ "MKD",  1, cmd_mkd, 0, 1, 3  },
+	{ "STOR", 0, cmd_stor, 0, 1, 4, 1 },
+	{ "DELE", 1, cmd_dele, 0, 1, 4, 1 },
+	{ "RMD",  1, cmd_rmd,  0, 1, 3, 1 },
+	{ "MKD",  1, cmd_mkd,  0, 1, 3, 1 },
 #endif
-	{ "ALLO", 0, cmd_allo, 0, 1, 4 },
-	{ "PWD",  0, cmd_pwd, 0, 1, 3  },
-	{ "CWD",  1, cmd_cwd, 0, 1, 3  },
-	{ " ",    0, NULL, 0, 0, 0     }
+	{ "ALLO", 0, cmd_allo, 0, 1, 4, 0 },
+	{ "PWD",  0, cmd_pwd,  0, 1, 3, 0 },
+	{ "CWD",  1, cmd_cwd,  0, 1, 3, 0 },
+	{ " ",    0, NULL, 0,  0, 0, 0    }
 };

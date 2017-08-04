@@ -39,27 +39,6 @@ struct connection {
 	int c_flags;
 
 	struct transport *transport;
-	struct data_channel {
-		struct sockaddr_in r_info;
-		struct stat st;
-
-		int listen_socket;
-		int socket;
-
-		int data_port;
-
-		int local_fd;
-		off_t offset;
-
-		/* state */
-		int t_flags;
-
-		/*
-		 * for LIST/NLST cmd
-		 */
-		struct list_opt l_opt;
-	} dc;
-
 	TAILQ_ENTRY(connection) entries;
 };
 

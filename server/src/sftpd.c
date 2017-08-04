@@ -545,9 +545,7 @@ restart:
 static void
 kill_non_active_clients()
 {
-	
-	
-	
+	/* TODO */
 }
 
 static void

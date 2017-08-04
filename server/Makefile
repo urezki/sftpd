@@ -1,7 +1,8 @@
 # Mafifile
 
 CC = gcc
-CFLAGS	= -g -O0 -Wall -Werror -D_GNU_SOURCE -DMEMORY_DEBUG -DUPLOAD_SUPPORT -std=c99
+# CFLAGS	= -g -O0 -Wall -Werror -D_GNU_SOURCE -DUPLOAD_SUPPORT -std=c99
+CFLAGS	= -g -O0 -Wall -Werror -D_GNU_SOURCE -std=c99
 INCLUDE = -I./include
 LIB = -lcrypt -pthread
 
