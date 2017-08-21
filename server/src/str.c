@@ -109,3 +109,39 @@ str_removesfs(char *a, const char *b)
 
 	return i;
 }
+
+/**
+ * example:
+ *     in: "LIST -a -l incoming/"
+ *     str_remove_symbols(str, '-', ' ');
+ *     out: "LIST incoming/"
+ */
+size_t
+str_remove_from_to_symbols(char *str, char a, char b)
+{
+	size_t str_new_len = 0;
+	size_t str_len;
+	int i, j;
+
+	str_len = str_strlen(str);
+
+again:
+	for (i = 0; i < str_len; i++) {
+		if (str[i] == a) {
+			for (j = i; j < str_len; j++) {
+				if (str[j] == b) {
+					do {
+						str[i++] = str[++j];
+					} while (str[j] != '\0');
+
+					/* minus '\0' */
+					str_new_len = str_len =
+						(str_len - (j - i)) - 1;
+					goto again;
+				}
+			}
+		}
+	}
+
+	return str_new_len;
+}

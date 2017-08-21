@@ -122,7 +122,7 @@ convert_path_to_abs_and_check(struct connection *conn)
 		}
 	}
 
-	if (!strncmp(abs_path, conn->root_dir, strlen(conn->root_dir))) {
+	if (!strncmp(abs_path, conn->root_dir, str_strlen(conn->root_dir))) {
 		char cmd[MAX_CMD_LEN] = {'\0'};
 		int i = 0;
 
@@ -152,7 +152,7 @@ cmd_feat(void *srv, struct connection *conn)
 	FUNC_ENTRY();
 	
 	/* sending informations about features. */
-	send_data(conn->sock_fd, feat, strlen(feat), 0);
+	send_data(conn->sock_fd, feat, str_strlen(feat), 0);
 	
 	FUNC_EXIT_VOID();
 }
@@ -384,6 +384,15 @@ cmd_pasv(void *srv, struct connection *conn)
 			goto failed_with_errno;
 		}
 
+		t->listen_socket = listen_sock;
+		FD_SET(t->listen_socket, &((ftpd *)srv)->read_ready);
+
+		/*
+		 * T_PASV flag is set right after a connection
+		 * is established by the client with server side.
+		 */
+		FLAG_SET(t->t_flags, T_ACPT);
+
 		/* we are ready */
 		send_cmd(conn->sock_fd, 227, "Entering passive mode (%u,%u,%u,%u,%u,%u)",
 				 (htonl(addr.sin_addr.s_addr) & 0xff000000) >> 24,
@@ -393,9 +402,6 @@ cmd_pasv(void *srv, struct connection *conn)
 				 (htons(addr.sin_port) & 0xff00) >> 8,
 				 (htons(addr.sin_port) & 0x00ff));
 
-		t->listen_socket = listen_sock;
-		FD_SET(t->listen_socket, &((ftpd *)srv)->read_ready);
-		FLAG_SET(t->t_flags, T_ACPT);
 		goto end;
 	} else {
 		send_cmd(conn->sock_fd, 503, "Sorry, only one transfer at once.");
@@ -605,16 +611,22 @@ cmd_list(void *srv, struct connection *c)
 
 	t = c->transport;
 
+	/* is transport ready? */
 	if (!FLAG_QUERY(t->t_flags, (T_PORT | T_PASV)))
 		goto use_port_or_pasv;
+
+	/* check and remove arguments */
+	ret = str_remove_from_to_symbols(c->recv_buf, '-', ' ');
+	if (!ret) {
+		char *arg = strrchr(c->recv_buf, ' ');
+		if (arg && *(arg + 1) == '-')
+			*arg = '\0';
+	}
 
 	if (!convert_path_to_abs_and_check(c))
 		goto no_such_file_or_dir;
 
-	path = strchr(c->recv_buf, ' ');
-	BUG_ON(!path);
-	path += 1;
-
+	path = strchr(c->recv_buf, ' ') + 1;
 	ret = stat(path, &t->l_opt.st);
 	if (ret != 0)
 		goto no_such_file_or_dir;
@@ -744,7 +756,7 @@ cmd_pwd(void *srv, struct connection *conn)
 	
 	FUNC_ENTRY();
 	
-	root_len = strlen(conn->root_dir);
+	root_len = str_strlen(conn->root_dir);
 	send_cmd(conn->sock_fd, 257, "Current dir is \"%s\"",
 			 conn->curr_dir + (root_len - 1));
 	
@@ -761,7 +773,7 @@ cmd_cdup(void *srv, struct connection *conn)
 
 	retval = chdir("..");
 	if (retval != -1) {
-		int root_len = strlen(conn->root_dir);
+		int root_len = str_strlen(conn->root_dir);
 		
         /* get absolute path */
 		(void) getcwd(path, sizeof(path));
@@ -817,7 +829,7 @@ cmd_cwd(void *srv, struct connection *conn)
 			goto exit;
 		}
 
-		root_len = strlen(conn->root_dir);
+		root_len = str_strlen(conn->root_dir);
 		
 		/* get absolute path */
 		(void) getcwd(path, sizeof(path));

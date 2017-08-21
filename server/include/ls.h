@@ -14,6 +14,6 @@ struct list_opt {
 };
 
 extern char *get_file_list_chunk(DIR *, int, int);
-extern int build_list_line(const char *name, struct stat *st, char *line, int l_size, int short_l);
+extern int build_list_line(const char *name, struct stat *st, char *line, int l_size);
 
 #endif	/* __LS_H__ */

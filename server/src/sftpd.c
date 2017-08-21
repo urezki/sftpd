@@ -620,14 +620,15 @@ list_folder(struct connection *c)
 		char *arg = strrchr(c->recv_buf, ' ');
 		char line[400] = {'\0'};
 
-		ret = build_list_line(arg + 1, &t->l_opt.st, line, sizeof(line), is_nlst);
+		ret = build_list_line(arg + 1, !is_nlst ?
+				&t->l_opt.st:NULL, line, sizeof(line));
 		if (ret > 0)
 			(void) write(t->socket, line, ret);
 
 		goto leave;
 	}
 
-	list = get_file_list_chunk(t->l_opt.target_dir, 300, is_nlst);
+	list = get_file_list_chunk(t->l_opt.target_dir, 300, !is_nlst);
 	if (list) {
 		send_data(t->socket, list, strlen(list), 0);
 		free(list);

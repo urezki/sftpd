@@ -119,13 +119,13 @@ get_mtime(time_t time, char *mtime, int mtime_len)
 }
 
 int
-build_list_line(const char *name, struct stat *st, char *line, int l_size, int short_l)
+build_list_line(const char *name, struct stat *st, char *line, int l_size)
 {
 	char mtime[20] = {'\0'};
 	char perm[11] = {'\0'};
 	int ret = -1;
 
-	if (!short_l) {
+	if (st) {
 		/* Permissions */
 		(void) get_perm(st->st_mode, perm);
 		/* time of last modification */
@@ -142,35 +142,29 @@ build_list_line(const char *name, struct stat *st, char *line, int l_size, int s
 }
 
 char *
-get_file_list_chunk(DIR *dir, int nfiles, int short_list)
+get_file_list_chunk(DIR *dir, int how_many_files, int do_stat)
 {
 	struct dirent *d = NULL;
 	char line[400] = {'\0'};
 	char *chunk = NULL;
 	int len = 0;
 
-	if (nfiles > 0) {
-		chunk = (char *) calloc(nfiles * sizeof(line), sizeof(char));
+	if (how_many_files > 0) {
+		chunk = (char *) calloc(how_many_files * sizeof(line), sizeof(char));
 		if (chunk == NULL)
 			FATAL_ERROR("error: %s\n", strerror(errno));
 
-		for (int i = 0; i < nfiles; i++) {
+		for (int i = 0; i < how_many_files; i++) {
 			d = get_dirent_entry(dir);
 			if (d != NULL) {
 				struct stat st;
-				int ret;
 
-				ret = get_file_attr(dir, d->d_name, &st);
-				if (ret) {
-					if (short_list == 0) {
-						len += build_list_line(d->d_name, &st, line, sizeof(line), 0);
-					} else {
-						len += build_list_line(d->d_name, &st, line, sizeof(line), 1);
-					}
+				len += build_list_line(d->d_name, (do_stat ?
+						(get_file_attr(dir, d->d_name, &st) ?
+							&st:NULL):NULL), line, sizeof(line));
 
-					/* attach to the chunk */
-					(void) strcat(chunk, line);
-				}
+				/* attach to the chunk */
+				(void) strcat(chunk, line);
 			}
 		}
 
