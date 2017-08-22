@@ -311,8 +311,6 @@ destroy_connection(struct ftpd *srv, connection *conn)
 		if (c == conn) {
 			if (FD_ISSET(conn->sock_fd, &(srv->read_ready)))
 				FD_CLR(conn->sock_fd, &(srv->read_ready));
-			else
-				BUG();
 
 			close_socket(conn->sock_fd);
 			srv->client_count--;
@@ -698,6 +696,14 @@ process_transfers(struct ftpd *srv, fd_set *r_fd, fd_set *w_fd, int *n_ready)
 				(*n_ready)--;
 				processed++;
 			}
+
+			/*
+			 * Attach back the command channel. We have removed
+			 * it from the "read" pool because of waiting for a
+			 * client until it established a data channel.
+			 */
+			if (!FD_ISSET(c->sock_fd, &srv->read_ready))
+				FD_SET(c->sock_fd, &srv->read_ready);
 		} else if (FLAG_QUERY(t->t_flags, T_RETR)) {
 			if (FD_ISSET(t->socket, w_fd)) {
 				c->c_atime = time(NULL);

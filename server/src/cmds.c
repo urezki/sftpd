@@ -393,6 +393,18 @@ cmd_pasv(void *srv, struct connection *conn)
 		 */
 		FLAG_SET(t->t_flags, T_ACPT);
 
+		/*
+		 * Detach the command channel. We do it here since
+		 * many clients send channel depended commands before
+		 * a connections is established.
+		 *
+		 * For example Mozilla firefox 52.3.0:
+		 * -> PASV
+		 * -> LIST (handle LIST cmd with no data channel)
+		 * -> a client initiates a data channel
+		 */
+		FD_CLR(conn->sock_fd, &((ftpd *)srv)->read_ready);
+
 		/* we are ready */
 		send_cmd(conn->sock_fd, 227, "Entering passive mode (%u,%u,%u,%u,%u,%u)",
 				 (htonl(addr.sin_addr.s_addr) & 0xff000000) >> 24,
@@ -424,11 +436,6 @@ cmd_retr(void *srv, struct connection *conn)
 	FUNC_ENTRY();
 	
 	t = conn->transport;
-	if (!FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) {
-		send_cmd(conn->sock_fd, 425, "You must use PASV or PORT before.");
-		goto leave;
-	}
-		
 	if (convert_path_to_abs_and_check(conn)) {
 		l_file = strchr(conn->recv_buf, ' ');
 		t->local_fd = open(l_file + 1, O_RDONLY);
@@ -448,7 +455,6 @@ cmd_retr(void *srv, struct connection *conn)
 	if (!FLAG_QUERY(t->t_flags, T_RETR))
 		FLAG_APPEND(t->t_flags, T_KILL);
 
-leave:
 	FUNC_EXIT_VOID();
 }
 
@@ -471,22 +477,18 @@ cmd_stor(void *srv, struct connection *conn)
 	FUNC_ENTRY();
 
 	t = conn->transport;
-	if (FLAG_QUERY(t->t_flags, (T_PORT | T_PASV))) {
-		if (convert_path_to_abs_and_check(conn)) {
-			char *l_file = strchr(conn->recv_buf, ' ') + 1;
+	if (convert_path_to_abs_and_check(conn)) {
+		char *l_file = strchr(conn->recv_buf, ' ') + 1;
 
-			t->local_fd = open(l_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-			if (t->local_fd != -1) {
-				FD_SET(t->socket, &((ftpd *) srv)->read_ready);
-				send_cmd(conn->sock_fd, 150, "Binary mode.");
-				FLAG_SET(t->t_flags, T_STOR);
-			} else {
-				send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
-				FLAG_APPEND(t->t_flags, T_KILL);
-			}
+		t->local_fd = open(l_file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+		if (t->local_fd != -1) {
+			FD_SET(t->socket, &((ftpd *) srv)->read_ready);
+			send_cmd(conn->sock_fd, 150, "Binary mode.");
+			FLAG_SET(t->t_flags, T_STOR);
+		} else {
+			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+			FLAG_APPEND(t->t_flags, T_KILL);
 		}
-	} else {
-		send_cmd(conn->sock_fd, 425, "You must use PASV or PORT before.");
 	}
 
 	FUNC_EXIT_VOID();
@@ -611,10 +613,6 @@ cmd_list(void *srv, struct connection *c)
 
 	t = c->transport;
 
-	/* is transport ready? */
-	if (!FLAG_QUERY(t->t_flags, (T_PORT | T_PASV)))
-		goto use_port_or_pasv;
-
 	/* check and remove arguments */
 	ret = str_remove_from_to_symbols(c->recv_buf, '-', ' ');
 	if (!ret) {
@@ -644,10 +642,6 @@ cmd_list(void *srv, struct connection *c)
 	send_cmd(c->sock_fd, 150, "ASCII MODE");
 	FD_SET(t->socket, &((ftpd *) srv)->write_ready);
 	FLAG_SET(t->t_flags, T_LIST);
-	return;
-
-use_port_or_pasv:
-	send_cmd(c->sock_fd, 550, "sorry, use PORT or PASV first");
 	return;
 
 no_such_file_or_dir:
@@ -873,7 +867,8 @@ parse_cmd(void *srv, connection *conn)
 	conn->recv_buf_len = i;
 
 	/* get key, i.e. command name */
-	for (i = 0; conn->recv_buf[i] != ' ' && conn->recv_buf[i] != '\0'; i++) {
+	for (i = 0; conn->recv_buf[i] != ' ' &&
+			conn->recv_buf[i] != '\0'; i++) {
 		if (i < (sizeof(key) - 1))
 			key[i] = conn->recv_buf[i];
 	}
@@ -887,6 +882,18 @@ parse_cmd(void *srv, connection *conn)
 	if (entry) {
 		h = (const struct cmd_handler *) entry->data;
 		if (FLAG_QUERY(conn->c_flags, C_AUTH) || !h->need_auth) {
+			transport *t = conn->transport;
+
+			/*
+			 * check if a transport is ready for particular cmd
+			 */
+			if (h->need_transport) {
+				if (!FLAG_QUERY(t->t_flags, (T_PASV | T_PORT))) {
+					send_cmd(conn->sock_fd, 425, "use PORT or PASV first");
+					goto out;
+				}
+			}
+
 			/*
 			 * At first, we must set root UID and root GUID,
 			 * and than we will set what we really need on demand.
@@ -912,37 +919,38 @@ parse_cmd(void *srv, connection *conn)
 		PRINT_DEBUG("Bad command: %s\n", conn->recv_buf);
 	}
 
+out:
 	FUNC_EXIT_VOID();
 }
 
 const struct cmd_handler cmd_table[] =
 {
-	{ "USER", 1, cmd_user, 1, 0, 4, 0 },
-	{ "PASS", 1, cmd_pass, 1, 0, 4, 0 },
-	{ "PORT", 1, cmd_port, 1, 1, 4, 0 },
-	{ "PASV", 0, cmd_pasv, 0, 1, 4, 0 },
-	{ "LIST", 1, cmd_list, 1, 1, 4, 1 },
-	{ "NLST", 1, cmd_nlst, 1, 1, 4, 1 },
-	{ "CDUP", 0, cmd_cdup, 0, 1, 4, 0 },
-	/* { "MDTM", 1, cmd_mdtm, 0, 1, 4, 1 }, */
-	{ "RETR", 1, cmd_retr, 0, 1, 4, 1 },
-	{ "SIZE", 1, cmd_size, 0, 1, 4, 1 },
-	{ "NOOP", 0, cmd_noop, 0, 1, 4, 0 },
-	{ "SYST", 0, cmd_syst, 0, 0, 4, 1 },
-	{ "TYPE", 0, cmd_type, 0, 1, 4, 0 },
-	{ "ABOR", 0, cmd_abor, 0, 1, 4, 0 },
-	{ "STRU", 0, cmd_stru, 0, 1, 4, 1 },
-	{ "QUIT", 0, cmd_quit, 0, 0, 4, 0 },
-	{ "FEAT", 0, cmd_feat, 0, 0, 4, 0 },
-	{ "HELP", 0, cmd_help, 0, 1, 4, 0 },
+	{ "USER", 1, cmd_user, 1, 0, 4, 0, 0 },
+	{ "PASS", 1, cmd_pass, 1, 0, 4, 0, 0 },
+	{ "PORT", 1, cmd_port, 1, 1, 4, 0, 0 },
+	{ "PASV", 0, cmd_pasv, 0, 1, 4, 0, 0 },
+	{ "LIST", 1, cmd_list, 1, 1, 4, 1, 1 },
+	{ "NLST", 1, cmd_nlst, 1, 1, 4, 1, 1 },
+	{ "CDUP", 0, cmd_cdup, 0, 1, 4, 0, 0 },
+	/* { "MDTM", 1, cmd_mdtm, 0, 1, 4, 1, 0 }, */
+	{ "RETR", 1, cmd_retr, 0, 1, 4, 1, 1 },
+	{ "SIZE", 1, cmd_size, 0, 1, 4, 1, 0 },
+	{ "NOOP", 0, cmd_noop, 0, 1, 4, 0, 0 },
+	{ "SYST", 0, cmd_syst, 0, 0, 4, 1, 0 },
+	{ "TYPE", 0, cmd_type, 0, 1, 4, 0, 0 },
+	{ "ABOR", 0, cmd_abor, 0, 1, 4, 0, 0 },
+	{ "STRU", 0, cmd_stru, 0, 1, 4, 1, 0 },
+	{ "QUIT", 0, cmd_quit, 0, 0, 4, 0, 0 },
+	{ "FEAT", 0, cmd_feat, 0, 0, 4, 0, 0 },
+	{ "HELP", 0, cmd_help, 0, 1, 4, 0, 0 },
 #ifdef UPLOAD_SUPPORT
-	{ "STOR", 0, cmd_stor, 0, 1, 4, 1 },
-	{ "DELE", 1, cmd_dele, 0, 1, 4, 1 },
-	{ "RMD",  1, cmd_rmd,  0, 1, 3, 1 },
-	{ "MKD",  1, cmd_mkd,  0, 1, 3, 1 },
+	{ "STOR", 0, cmd_stor, 0, 1, 4, 1, 1 },
+	{ "DELE", 1, cmd_dele, 0, 1, 4, 1, 0 },
+	{ "RMD",  1, cmd_rmd,  0, 1, 3, 1, 0 },
+	{ "MKD",  1, cmd_mkd,  0, 1, 3, 1, 0 },
 #endif
-	{ "ALLO", 0, cmd_allo, 0, 1, 4, 0 },
-	{ "PWD",  0, cmd_pwd,  0, 1, 3, 0 },
-	{ "CWD",  1, cmd_cwd,  0, 1, 3, 0 },
-	{ " ",    0, NULL, 0,  0, 0, 0    }
+	{ "ALLO", 0, cmd_allo, 0, 1, 4, 0, 0 },
+	{ "PWD",  0, cmd_pwd,  0, 1, 3, 0, 0 },
+	{ "CWD",  1, cmd_cwd,  0, 1, 3, 0, 0 },
+	{ " ",    0, NULL, 0,  0, 0, 0, 0    }
 };

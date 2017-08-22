@@ -11,6 +11,7 @@ struct cmd_handler {
 	int need_auth;
 	char cmd_len;
 	char need_check_chroot;
+	char need_transport;
 };
 
 extern const struct cmd_handler cmd_table[];
