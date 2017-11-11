@@ -173,25 +173,30 @@ out:
 struct hash_entry *
 hash_lookup(struct hash *h, const char *key)
 {
-	struct hash_entry *tmp;
+	struct hash_entry *entry = NULL;
 	unsigned int index;
 
 	if (h && key) {
 		index = hash_function(key, h->hash_size);
-		tmp = h->hash_table[index];
-		if (tmp == NULL)
-			goto out;
+		entry = h->hash_table[index];
+		if (entry) {
+			if (!entry->next)
+				goto no_collisions;
 
-		while (tmp) {
-			if (!strcmp(tmp->key, key))
-				return tmp;
-
-			tmp = tmp->next;
+			/*
+			 * There are collisions, so	find and entry
+			 * comparing with a given key. Will slow down
+			 * a cash lookup.
+			 */
+			do {
+				if (!strcmp(entry->key, key))
+					break;
+			} while ((entry = entry->next));
 		}
 	}
 
-out:
-	return NULL;
+no_collisions:
+	return entry;
 }
 
 struct hash *

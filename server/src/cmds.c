@@ -498,21 +498,32 @@ static void
 cmd_dele(void *srv, struct connection *conn)
 {
 	char *l_file;
-	int ret;
+	int ret = -1;
 
 	FUNC_ENTRY();
 
+	/*
+	 * initially set to ENOENT
+	 */
+	errno = ENOENT;
+
 	if (convert_path_to_abs_and_check(conn)) {
 		l_file = strchr(conn->recv_buf, ' ') + 1;
-		ret = unlink(l_file);
-		if (ret != -1)
-			send_cmd(conn->sock_fd, 250, "File deleted OK.");
-		else
-			send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
-	} else {
-		errno = ENOENT;
-		send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
+		ret = open(l_file, O_WRONLY);
+		if (ret != -1) {
+			close(ret);
+
+			/*
+			 * on error returns -1
+			 */
+			ret = unlink(l_file);
+		}
 	}
+
+	if (ret != -1)
+		send_cmd(conn->sock_fd, 250, "File deleted OK.");
+	else
+		send_cmd(conn->sock_fd, 550, "%s", strerror(errno));
 
 	FUNC_EXIT_VOID();
 }
@@ -923,14 +934,23 @@ out:
 	FUNC_EXIT_VOID();
 }
 
-const struct cmd_handler cmd_table[] =
-{
+const struct cmd_handler cmd_table[] = {
+	/*
+	 * 0 - CMD name
+	 * 1 - CMD argument
+	 * 2 - CMD handler
+	 * 3 - CMD command requires root privileges
+	 * 4 - CMD command requires authentication
+	 * 5 - CMD command len (4/3 all the time)
+	 * 6 - CMD if chroot has to be checked
+	 * 7 - CMD requires a data transfer channel
+	 */
 	{ "USER", 1, cmd_user, 1, 0, 4, 0, 0 },
 	{ "PASS", 1, cmd_pass, 1, 0, 4, 0, 0 },
 	{ "PORT", 1, cmd_port, 1, 1, 4, 0, 0 },
 	{ "PASV", 0, cmd_pasv, 0, 1, 4, 0, 0 },
-	{ "LIST", 1, cmd_list, 1, 1, 4, 1, 1 },
-	{ "NLST", 1, cmd_nlst, 1, 1, 4, 1, 1 },
+	{ "LIST", 1, cmd_list, 0, 1, 4, 1, 1 },
+	{ "NLST", 1, cmd_nlst, 0, 1, 4, 1, 1 },
 	{ "CDUP", 0, cmd_cdup, 0, 1, 4, 0, 0 },
 	/* { "MDTM", 1, cmd_mdtm, 0, 1, 4, 1, 0 }, */
 	{ "RETR", 1, cmd_retr, 0, 1, 4, 1, 1 },

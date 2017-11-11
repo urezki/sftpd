@@ -692,18 +692,18 @@ process_transfers(struct ftpd *srv, fd_set *r_fd, fd_set *w_fd, int *n_ready)
 					FLAG_APPEND(t->t_flags, T_KILL);
 				}
 
+				/*
+				 * Attach back the command channel. We have removed
+				 * it from the "read" pool because of waiting for a
+				 * client until it established a data channel.
+				 */
+				if (!FD_ISSET(c->sock_fd, &srv->read_ready))
+					FD_SET(c->sock_fd, &srv->read_ready);
+
 				c->c_atime = time(NULL);
 				(*n_ready)--;
 				processed++;
 			}
-
-			/*
-			 * Attach back the command channel. We have removed
-			 * it from the "read" pool because of waiting for a
-			 * client until it established a data channel.
-			 */
-			if (!FD_ISSET(c->sock_fd, &srv->read_ready))
-				FD_SET(c->sock_fd, &srv->read_ready);
 		} else if (FLAG_QUERY(t->t_flags, T_RETR)) {
 			if (FD_ISSET(t->socket, w_fd)) {
 				c->c_atime = time(NULL);
